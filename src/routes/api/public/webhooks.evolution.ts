@@ -1260,18 +1260,11 @@ function isBairroAtendido(neighborhood: string | null | undefined, bairrosAtendi
 }
 
 // ============================================================
-// BAIRROS NÃO ATENDIDOS e RUAS NÃO ATENDIDAS — listas negativas
-// explícitas (CRUD em Configurações → Bairros não atendidos / Ruas não
-// atendidas). Diferente de "bairros_atendidos" (lista positiva, só entra em
-// vigor quando tem pelo menos 1 item ativo), estas duas são um bloqueio
-// direto: qualquer bairro ou rua cadastrado aqui NUNCA é considerado
-// atendido, mesmo que:
-//  - esteja também na lista de bairros atendidos (erro de cadastro);
-//  - o cálculo por distância/km diga que está dentro do raio;
-//  - as "Instruções para a IA" (texto livre) sugiram o contrário.
-// Isso existe pra cobrir o caso de bairro/rua que fica geograficamente
-// dentro da área normal de entrega, mas que a loja decidiu não atender por
-// algum motivo específico (ex: histórico de problema na região).
+// BAIRROS NÃO ATENDIDOS e RUAS NÃO ATENDIDAS — listas negativas.
+// REGRA DE PRIORIDADE: enquanto existir uma lista POSITIVA de bairros ativos,
+// qualquer bairro que conste nela é atendido e vence eventual duplicidade na
+// lista negativa. Ruas explicitamente bloqueadas continuam podendo ser tratadas
+// como exceção operacional.
 function isBairroNaoAtendido(neighborhood: string | null | undefined, bairrosNaoAtendidos: string[]): boolean {
   if (!bairrosNaoAtendidos.length) return false;
   return !!findConfiguredBairroMatch(neighborhood, bairrosNaoAtendidos);
@@ -4074,6 +4067,52 @@ async function handleIncomingMessageUnlocked(
           await replyAndLog(supabaseAdmin, conversation.id, phone, q);
           return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
         }
+      }
+
+      // PRIORIDADE ABSOLUTA: antes de consultar qualquer base municipal, lista
+      // negativa ou heurística, compara a mensagem diretamente com TODOS os
+      // bairros ATIVOS configurados no painel. Se houver match, o bairro é
+      // atendido e nenhuma outra regra pode reclassificá-lo como externo.
+      const directActiveNeighborhoodMatch = findConfiguredBairroMatch(text, bairrosAtendidos);
+      if (directActiveNeighborhoodMatch) {
+        const directSpecial = specialNeighborhoodDecision(directActiveNeighborhoodMatch, text);
+        if (directSpecial === "ask") {
+          const q = specialNeighborhoodQuestion(directActiveNeighborhoodMatch);
+          if (q) {
+            await replyAndLog(supabaseAdmin, conversation.id, phone, q);
+            return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
+          }
+        }
+        if (directSpecial === "redirect") {
+          await replyAndLog(
+            supabaseAdmin,
+            conversation.id,
+            phone,
+            formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
+          );
+          return Response.json({ ok: true, action: "special_neighborhood_redirect" });
+        }
+
+        draft.delivery_mode = "delivery";
+        draft.address_neighborhood = directActiveNeighborhoodMatch;
+        draft.out_of_delivery_area = false;
+        await supabaseAdmin
+          .from("order_drafts")
+          .update({
+            delivery_mode: "delivery",
+            address_neighborhood: directActiveNeighborhoodMatch,
+            out_of_delivery_area: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("conversation_id", conversation.id);
+
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
+        );
+        return Response.json({ ok: true, action: "active_neighborhood_accepted_directly" });
       }
 
       const pendingNeighborhoodConfirmation = pendingNeighborhoodConfirmationFromHistory(history);
