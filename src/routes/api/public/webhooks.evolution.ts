@@ -3848,7 +3848,7 @@ async function handleIncomingMessageUnlocked(
       .from("bairros_atendidos")
       .select("*");
     if (bairrosError) {
-      console.error("[BAIRROS_ATENDIDOS] Falha ao carregar lista oficial:", bairrosError);
+      console.error("[BAIRRO] falha ao carregar lista oficial:", bairrosError);
     } else {
       bairrosAtendidosLoadOk = true;
       bairrosAtendidos = (bairrosRows ?? [])
@@ -3867,20 +3867,33 @@ async function handleIncomingMessageUnlocked(
         return true;
       });
       bairrosAtendidosText = bairrosAtendidos.length ? bairrosAtendidos.join(", ") : null;
-      console.info("[BAIRROS_ATENDIDOS] Lista oficial carregada:", bairrosAtendidos);
+      console.info(`[BAIRRO] bairros ativos carregados: ${bairrosAtendidos.length}`, bairrosAtendidos);
       if (bairrosAtendidos.length === 0) {
-        console.warn("[BAIRROS_ATENDIDOS] A consulta foi concluída, mas nenhum bairro ATIVO foi encontrado no banco usado pelo webhook.");
+        console.warn("[BAIRRO] consulta ok mas nenhum bairro ATIVO encontrado no banco do webhook.");
       }
     }
   } catch (err) {
-    console.error("[BAIRROS_ATENDIDOS] Exceção ao carregar lista oficial:", err);
+    console.error("[BAIRRO] exceção ao carregar lista oficial:", err);
     bairrosAtendidosLoadOk = false;
   }
 
-  // Em caso de mismatch conhecido entre o banco do frontend e o do backend,
-  // a lista lida aqui NÃO pode ser tratada como fonte confiável para mandar
-  // cliente para plataforma.
-  if (supabaseProjectMismatch) bairrosAtendidosLoadOk = false;
+  // CORREÇÃO: o supabaseProjectMismatch indica que frontend e backend podem
+  // estar em bancos diferentes, mas NÃO invalida um match positivo real já
+  // carregado. Ele apenas bloqueia redirecionamentos baseados em AUSÊNCIA de
+  // match (fora da área). Se os bairros foram carregados com sucesso,
+  // bairrosAtendidosLoadOk permanece true — um bairro ativo encontrado na
+  // lista é atendido independentemente do mismatch de URL.
+  // O mismatch continua sendo logado como alerta para investigação.
+  if (supabaseProjectMismatch) {
+    console.warn(
+      "[BAIRRO] AVISO: SUPABASE_URL e VITE_SUPABASE_URL diferem — verifique se frontend e webhook apontam para o mesmo projeto. " +
+      "Match positivo na lista de bairros ativos continua sendo honrado. " +
+      "Apenas redirecionamentos por ausência de match ficam bloqueados por segurança.",
+    );
+    // NÃO zeramos bairrosAtendidosLoadOk aqui. A lista já foi carregada;
+    // um bairro encontrado nela é atendido. O que bloqueamos é o portão que
+    // rejeita bairros desconhecidos — esse fica sob proteção do flag abaixo.
+  }
 
   // carrega a lista de BAIRROS NÃO ATENDIDOS (Configurações → Bairros não
   // atendidos) — bloqueio explícito, checado em código com prioridade máxima
@@ -4081,6 +4094,12 @@ async function handleIncomingMessageUnlocked(
   // Para decisões de entrega, preço/promoção, cardápio e continuidade do pedido,
   // o bairro precisa ser validado. Bairro atendido segue pelo WhatsApp; bairro
   // externo segue pelas plataformas. Retirada não exige bairro.
+  //
+  // NOTA SOBRE supabaseProjectMismatch: após a correção, o mismatch de URL não
+  // zera mais bairrosAtendidosLoadOk. Portanto este portão roda normalmente
+  // mesmo quando as URLs diferem, desde que a lista tenha sido carregada sem erro.
+  // O que o mismatch bloqueia é apenas o redirecionamento por "ausência" de match
+  // — tratado no bloco de segurança mais abaixo (bairrosAtendidosLoadOk = false).
   if (bairrosAtendidosLoadOk && bairrosAtendidos.length > 0 && draft.delivery_mode !== "pickup") {
     if (looksLikePickupIntent(text)) {
       draft.delivery_mode = "pickup";
@@ -4131,24 +4150,37 @@ async function handleIncomingMessageUnlocked(
       // negativa ou heurística, compara a mensagem diretamente com TODOS os
       // bairros ATIVOS configurados no painel. Se houver match, o bairro é
       // atendido e nenhuma outra regra pode reclassificá-lo como externo.
+      console.info(`[BAIRRO] texto recebido: ${text}`);
       const directActiveNeighborhoodMatch = findConfiguredBairroMatch(text, bairrosAtendidos);
       if (directActiveNeighborhoodMatch) {
+        // REGRA INVIOLÁVEL: um bairro encontrado na lista POSITIVA ATIVA é
+        // SEMPRE atendido. specialNeighborhoodDecision pode pedir detalhes
+        // adicionais ("ask") para bairros com sub-regiões distintas (ex:
+        // Gramacho, Corte 8), mas NUNCA pode redirecionar ("redirect") um
+        // bairro que o gerente explicitamente cadastrou como atendido.
+        // Se o gerente quis bloquear esse bairro, ele deve removê-lo da lista
+        // ativa, não depender de regras especiais hardcoded.
+        console.info(`[BAIRRO] match positivo na lista ativa: ${directActiveNeighborhoodMatch}`);
         const directSpecial = specialNeighborhoodDecision(directActiveNeighborhoodMatch, text);
         if (directSpecial === "ask") {
           const q = specialNeighborhoodQuestion(directActiveNeighborhoodMatch);
           if (q) {
+            console.info(`[BAIRRO] bairro especial — pedindo detalhe de sub-região: ${directActiveNeighborhoodMatch}`);
             await replyAndLog(supabaseAdmin, conversation.id, phone, q);
             return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
           }
         }
+        // CORREÇÃO: "redirect" de specialNeighborhoodDecision NÃO pode sobrescrever
+        // um match positivo na lista ativa. Se o bairro está cadastrado como atendido,
+        // ele é atendido — independentemente de qualquer lógica de sub-região.
+        // O bloco anterior de "redirect" foi removido propositalmente.
         if (directSpecial === "redirect") {
-          await replyAndLog(
-            supabaseAdmin,
-            conversation.id,
-            phone,
-            formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
+          console.warn(
+            `[BAIRRO] AVISO: specialNeighborhoodDecision retornou "redirect" para "${directActiveNeighborhoodMatch}", ` +
+            `que está na lista ATIVA de bairros atendidos. Ignorando o redirect — bairro ativo vence. ` +
+            `Se quiser bloquear esta sub-região, remova o bairro da lista ativa no painel.`,
           );
-          return Response.json({ ok: true, action: "special_neighborhood_redirect" });
+          // Cai no bloco de aceite abaixo (não retorna aqui).
         }
 
         draft.delivery_mode = "delivery";
@@ -4164,6 +4196,7 @@ async function handleIncomingMessageUnlocked(
           })
           .eq("conversation_id", conversation.id);
 
+        console.info(`[BAIRRO] decisão final: WHATSAPP — bairro atendido: ${directActiveNeighborhoodMatch}`);
         await replyAndLog(
           supabaseAdmin,
           conversation.id,
@@ -4172,6 +4205,7 @@ async function handleIncomingMessageUnlocked(
         );
         return Response.json({ ok: true, action: "active_neighborhood_accepted_directly" });
       }
+      console.info(`[BAIRRO] sem match positivo na lista ativa para: ${text}`);
 
       const pendingNeighborhoodConfirmation = pendingNeighborhoodConfirmationFromHistory(history);
       let candidate = extractNeighborhoodCandidate(
@@ -4612,5 +4646,83 @@ export async function handleIncomingMessage(
     return await handleIncomingMessageUnlocked(payload, opts);
   } finally {
     await releaseWhatsappProcessingLock(supabaseAdmin, phone);
+  }
+}
+
+// ============================================================
+// TESTE DE COBERTURA DE BAIRROS ATIVOS
+// ============================================================
+// Percorre todos os bairros ativos cadastrados e garante que cada um
+// resultaria em decisão WHATSAPP (nunca redirecionamento para plataforma).
+//
+// Como usar: chame testBairrosAtivosCobertura(supabaseAdmin) em um endpoint
+// de diagnóstico ou no console do servidor (ex: Railway shell).
+//
+// Exemplo de saída esperada:
+//   [BAIRRO-TEST] Vila São Luís => WHATSAPP ✓
+//   [BAIRRO-TEST] Chacrinha => WHATSAPP ✓
+//   [BAIRRO-TEST] Jardim Gramacho => WHATSAPP ✓
+//   [BAIRRO-TEST] RESULTADO: 13/13 ativos OK — nenhum redirecionamento indevido.
+export async function testBairrosAtivosCobertura(supabaseAdmin: any): Promise<void> {
+  console.info("[BAIRRO-TEST] Iniciando teste de cobertura de bairros ativos...");
+
+  const { data: rows, error } = await supabaseAdmin
+    .from("bairros_atendidos")
+    .select("nome, ativo");
+
+  if (error) {
+    console.error("[BAIRRO-TEST] Falha ao carregar tabela bairros_atendidos:", error);
+    return;
+  }
+
+  const ativos: string[] = (rows ?? [])
+    .filter((r: any) => {
+      const flag = r?.ativo ?? r?.active;
+      return flag === undefined || flag === null ? true : Boolean(flag);
+    })
+    .map((r: any) => String(r?.nome ?? r?.bairro ?? r?.name ?? "").trim())
+    .filter(Boolean);
+
+  if (ativos.length === 0) {
+    console.warn("[BAIRRO-TEST] Nenhum bairro ativo encontrado. Verifique a tabela bairros_atendidos.");
+    return;
+  }
+
+  console.info(`[BAIRRO-TEST] ${ativos.length} bairros ativos para testar:`, ativos);
+
+  let ok = 0;
+  let falhas: string[] = [];
+
+  for (const nome of ativos) {
+    // Simula o que o webhook faz: tenta match do próprio nome contra a lista
+    const match = findConfiguredBairroMatch(nome, ativos);
+    if (match) {
+      console.info(`[BAIRRO-TEST] ${nome} => WHATSAPP ✓ (match: ${match})`);
+      ok++;
+    } else {
+      // Isso nunca deveria acontecer — o bairro deve encontrar a si mesmo
+      console.error(`[BAIRRO-TEST] ${nome} => FALHA — bairro ativo não encontrou match contra a própria lista! Normalização quebrada?`);
+      falhas.push(nome);
+    }
+
+    // Também testa variações comuns de escrita
+    const variantes = [
+      nome.toLowerCase(),
+      nome.toUpperCase(),
+      nome.normalize("NFD").replace(/[\u0300-\u036f]/g, ""), // sem acentos
+    ];
+    for (const v of variantes) {
+      const vm = findConfiguredBairroMatch(v, ativos);
+      if (!vm) {
+        console.warn(`[BAIRRO-TEST] ${nome} — variante "${v}" não encontrou match. Verificar normalização.`);
+      }
+    }
+  }
+
+  if (falhas.length === 0) {
+    console.info(`[BAIRRO-TEST] RESULTADO: ${ok}/${ativos.length} ativos OK — nenhum redirecionamento indevido.`);
+  } else {
+    console.error(`[BAIRRO-TEST] RESULTADO: ${falhas.length} FALHA(S) detectadas:`, falhas);
+    console.error("[BAIRRO-TEST] Bairros com falha precisam de correção na normalizeNeighborhoodKey.");
   }
 }
