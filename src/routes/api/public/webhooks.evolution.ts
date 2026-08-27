@@ -3817,21 +3817,70 @@ async function handleIncomingMessageUnlocked(
     // tabela ai_instructions ainda não existe — continua sem instruções extras
   }
 
+  // Diagnóstico de conexão: a tela web normalmente usa VITE_SUPABASE_URL e
+  // este webhook usa SUPABASE_URL. Se ambas existirem no Railway e forem
+  // diferentes, Configurações e webhook estão olhando bancos distintos.
+  const serverSupabaseUrl = String(process.env.SUPABASE_URL ?? "").replace(/\/$/, "");
+  const frontendSupabaseUrl = String(process.env.VITE_SUPABASE_URL ?? "").replace(/\/$/, "");
+  const supabaseProjectMismatch = Boolean(
+    serverSupabaseUrl && frontendSupabaseUrl && serverSupabaseUrl !== frontendSupabaseUrl,
+  );
+  if (supabaseProjectMismatch) {
+    console.error(
+      "[SUPABASE_CONFIG] ERRO: SUPABASE_URL e VITE_SUPABASE_URL apontam para projetos diferentes. " +
+      "A tela e o webhook não estão lendo o mesmo banco.",
+      { serverSupabaseUrl, frontendSupabaseUrl },
+    );
+  }
+
   // carrega a lista oficial de bairros atendidos (Configurações → Bairros
   // atendidos) — quando existe pelo menos 1 bairro ativo, ela vira a fonte
   // de verdade sobre área de entrega, veja applyBairroOverride().
   let bairrosAtendidos: string[] = [];
   let bairrosAtendidosText: string | null = null;
+  let bairrosAtendidosLoadOk = false;
   try {
-    const { data: bairrosRows } = await (supabaseAdmin as any)
+    // IMPORTANTE: não filtra no SQL por `ativo` aqui. Já tivemos versões da
+    // tabela com pequenas diferenças de schema e uma consulta rígida pode
+    // devolver erro/nenhum dado silenciosamente. Carregamos as linhas e
+    // normalizamos em JS, usando a mesma base que a tela de Configurações.
+    const { data: bairrosRows, error: bairrosError } = await (supabaseAdmin as any)
       .from("bairros_atendidos")
-      .select("nome")
-      .eq("ativo", true);
-    bairrosAtendidos = (bairrosRows ?? []).map((r: any) => String(r.nome)).filter(Boolean);
-    bairrosAtendidosText = bairrosAtendidos.length ? bairrosAtendidos.join(", ") : null;
-  } catch {
-    // tabela bairros_atendidos ainda não existe — continua sem a lista estruturada
+      .select("*");
+    if (bairrosError) {
+      console.error("[BAIRROS_ATENDIDOS] Falha ao carregar lista oficial:", bairrosError);
+    } else {
+      bairrosAtendidosLoadOk = true;
+      bairrosAtendidos = (bairrosRows ?? [])
+        .filter((r: any) => {
+          const flag = r?.ativo ?? r?.active;
+          return flag === undefined || flag === null ? true : Boolean(flag);
+        })
+        .map((r: any) => String(r?.nome ?? r?.bairro ?? r?.name ?? "").trim())
+        .filter(Boolean);
+      // remove duplicados equivalentes, preservando a grafia cadastrada mais recente
+      const seen = new Set<string>();
+      bairrosAtendidos = bairrosAtendidos.filter((nome) => {
+        const key = normalizeNeighborhoodKey(nome);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      bairrosAtendidosText = bairrosAtendidos.length ? bairrosAtendidos.join(", ") : null;
+      console.info("[BAIRROS_ATENDIDOS] Lista oficial carregada:", bairrosAtendidos);
+      if (bairrosAtendidos.length === 0) {
+        console.warn("[BAIRROS_ATENDIDOS] A consulta foi concluída, mas nenhum bairro ATIVO foi encontrado no banco usado pelo webhook.");
+      }
+    }
+  } catch (err) {
+    console.error("[BAIRROS_ATENDIDOS] Exceção ao carregar lista oficial:", err);
+    bairrosAtendidosLoadOk = false;
   }
+
+  // Em caso de mismatch conhecido entre o banco do frontend e o do backend,
+  // a lista lida aqui NÃO pode ser tratada como fonte confiável para mandar
+  // cliente para plataforma.
+  if (supabaseProjectMismatch) bairrosAtendidosLoadOk = false;
 
   // carrega a lista de BAIRROS NÃO ATENDIDOS (Configurações → Bairros não
   // atendidos) — bloqueio explícito, checado em código com prioridade máxima
@@ -3839,14 +3888,23 @@ async function handleIncomingMessageUnlocked(
   let bairrosNaoAtendidos: string[] = [];
   let bairrosNaoAtendidosText: string | null = null;
   try {
-    const { data: bairrosNaoAtendidosRows } = await (supabaseAdmin as any)
+    const { data: bairrosNaoAtendidosRows, error: bairrosNaoError } = await (supabaseAdmin as any)
       .from("bairros_nao_atendidos")
-      .select("nome")
-      .eq("ativo", true);
-    bairrosNaoAtendidos = (bairrosNaoAtendidosRows ?? []).map((r: any) => String(r.nome)).filter(Boolean);
-    bairrosNaoAtendidosText = bairrosNaoAtendidos.length ? bairrosNaoAtendidos.join(", ") : null;
-  } catch {
-    // tabela bairros_nao_atendidos ainda não existe — continua sem a lista estruturada
+      .select("*");
+    if (!bairrosNaoError) {
+      bairrosNaoAtendidos = (bairrosNaoAtendidosRows ?? [])
+        .filter((r: any) => {
+          const flag = r?.ativo ?? r?.active;
+          return flag === undefined || flag === null ? true : Boolean(flag);
+        })
+        .map((r: any) => String(r?.nome ?? r?.bairro ?? r?.name ?? "").trim())
+        .filter(Boolean);
+      bairrosNaoAtendidosText = bairrosNaoAtendidos.length ? bairrosNaoAtendidos.join(", ") : null;
+    } else {
+      console.warn("[BAIRROS_NAO_ATENDIDOS] Falha ao carregar lista negativa:", bairrosNaoError);
+    }
+  } catch (err) {
+    console.warn("[BAIRROS_NAO_ATENDIDOS] Exceção ao carregar lista negativa:", err);
   }
 
   // carrega a lista de RUAS NÃO ATENDIDAS (Configurações → Ruas não
@@ -4023,7 +4081,7 @@ async function handleIncomingMessageUnlocked(
   // Para decisões de entrega, preço/promoção, cardápio e continuidade do pedido,
   // o bairro precisa ser validado. Bairro atendido segue pelo WhatsApp; bairro
   // externo segue pelas plataformas. Retirada não exige bairro.
-  if (bairrosAtendidos.length > 0 && draft.delivery_mode !== "pickup") {
+  if (bairrosAtendidosLoadOk && bairrosAtendidos.length > 0 && draft.delivery_mode !== "pickup") {
     if (looksLikePickupIntent(text)) {
       draft.delivery_mode = "pickup";
       draft.out_of_delivery_area = false;
@@ -4299,6 +4357,21 @@ async function handleIncomingMessageUnlocked(
       return Response.json({ ok: true, action: "redirect_platforms_existing_neighborhood" });
       }
     }
+  }
+
+  // SEGURANÇA CRÍTICA: se a tabela oficial de bairros não pôde ser carregada,
+  // jamais classifique o cliente como "fora da área" com base em heurística,
+  // prompt antigo ou lista municipal. Uma falha de banco não pode virar perda
+  // de venda. Mantém o atendimento sem redirecionamento e registra o erro no log.
+  if (!bairrosAtendidosLoadOk && draft.delivery_mode !== "pickup") {
+    if (draft.out_of_delivery_area) {
+      draft.out_of_delivery_area = false;
+      await supabaseAdmin
+        .from("order_drafts")
+        .update({ out_of_delivery_area: false, updated_at: new Date().toISOString() })
+        .eq("conversation_id", conversation.id);
+    }
+    console.error("[BAIRROS_ATENDIDOS] Lista oficial indisponível; redirecionamento automático bloqueado por segurança.");
   }
 
   // Saudação pura ("bom dia", "oi", etc, sozinha) NUNCA pode acionar nenhuma
