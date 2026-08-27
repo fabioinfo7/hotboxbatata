@@ -1092,8 +1092,8 @@ Você também é um ótimo vendedor, do nível dos melhores atendentes de delive
 Sua missão é coletar, ao longo da conversa (não precisa tudo de uma vez, vá perguntando naturalmente conforme a conversa flui, só depois que o cliente já demonstrou que quer pedir algo), os dados necessários pra fechar o pedido:
 - Nome de quem vai receber esse pedido específico${pushName ? ` (o nome do WhatsApp de quem está conversando é "${pushName}", mas pode não ser o nome real, ou pode estar pedindo pra outra pessoa — confirme)` : ""}
 - Se é pra ENTREGAR ou se o cliente vai RETIRAR na loja — pergunte isso naturalmente cedo na conversa (ex: "é pra entrega ou você prefere buscar aqui?"). Isso muda tudo o que vem depois.
-- Se for entrega: depois que o cliente demonstrar intenção de fazer o pedido e os itens estiverem definidos, pergunte "Qual seria o endereço de entrega, por favor?". Rua, número e bairro são obrigatórios. NUNCA diga ao cliente um endereço salvo de pedidos anteriores e nunca pergunte se é "o mesmo endereço". Use exclusivamente o endereço informado para este pedido. Se quiser passar referência, ótimo, mas não é obrigatório. NUNCA pergunte a cidade. Se for retirada, NÃO precisa de endereço nenhum — pula direto pros itens.
-- 🚨 CHAME update_order_draft NA HORA, ASSIM QUE RUA + NÚMERO + BAIRRO ESTIVEREM COMPLETOS — nunca espere juntar endereço + itens + pagamento pra chamar tudo de uma vez só perto do fechamento. O cálculo da taxa de entrega (e a confirmação da loja) tem que acontecer logo que o endereço é confirmado, ainda no meio da conversa, não coladinho no fechamento do pedido — isso evita atraso bem na hora de finalizar. Assim que tiver rua+número+bairro confirmados pelo cliente, chame update_order_draft imediatamente com esses três campos, mesmo que ainda faltem itens ou pagamento, e só depois continue perguntando o resto.
+- Se for entrega: depois que o cliente demonstrar intenção de fazer o pedido e os itens estiverem definidos, pergunte "Qual seria o endereço de entrega, por favor?". Para o endereço atual do pedido, rua e número precisam ser informados pelo cliente. O BAIRRO JÁ VALIDADO NO INÍCIO DA CONVERSA CONTINUA VÁLIDO E DEVE SER REUTILIZADO AUTOMATICAMENTE — NUNCA peça o bairro novamente se ele já foi confirmado neste atendimento. Exemplo: bairro validado = "Chacrinha"; cliente depois responde "Rua Andaraí, 10" → registre rua=Rua Andaraí, número=10 e mantenha bairro=Chacrinha. Só pergunte bairro novamente se nenhum bairro tiver sido validado ainda ou se o próprio cliente disser que quer corrigir/mudar o bairro. NUNCA revele ao cliente um endereço salvo de pedidos anteriores e nunca pergunte se é "o mesmo endereço". Se quiser passar referência, ótimo, mas não é obrigatório. NUNCA pergunte a cidade. Se for retirada, NÃO precisa de endereço nenhum — pula direto pros itens.
+- 🚨 CHAME update_order_draft NA HORA ASSIM QUE TIVER RUA + NÚMERO E JÁ EXISTIR BAIRRO VALIDADO NA CONVERSA. Não espere o cliente repetir o bairro. O sistema deve combinar rua+número recém-informados com o bairro validado no início e calcular a taxa imediatamente. Se o cliente informar um novo bairro explicitamente, aí sim atualize o bairro e revalide antes de calcular.
 - Itens do pedido — use SOMENTE os nomes e preços exatos do cardápio abaixo, nunca invente produto nem preço
 - QUANTIDADE INTELIGENTE — NUNCA pergunte quantidade quando ela já estiver explícita na frase do cliente. Artigos e números contam como quantidade: "uma de costela", "uma costela", "1 costela" = 1 unidade; "duas de pizza", "2 de pizza" = 2 unidades; "quero uma" = 1 unidade. Absorva a quantidade junto com o produto e chame update_order_draft. Só pergunte quantidade se realmente nenhuma quantidade puder ser inferida do que o cliente disse.
 - Forma de pagamento: quando esse dado estiver faltando, pergunte exatamente: "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador." Não favoreça nenhuma opção. Se o cliente disser "cartão", registre CARTÃO e continue — NUNCA pergunte crédito ou débito. Se disser "Pix", registre PIX e continue — NUNCA pergunte se será agora ou na entrega. Se ele espontaneamente disser "Pix agora", respeite essa informação.
@@ -1151,7 +1151,7 @@ Regras importantes:
 - Se finalize_order retornar "status: stock_check_failed", não finalize; diga que precisa confirmar a disponibilidade com a equipe e faça handoff humano.
 - Se finalize_order retornar "status: unmatched_products", o nome de algum item não bateu com nada do cardápio real — nunca finalize com um item assim. A resposta já vem com "suggestions": pra cada item não reconhecido, uma lista "closest" com os nomes REAIS do cardápio mais parecidos. Ofereça EXATAMENTE essas opções ao cliente (ex: "Você quis dizer 'Nome real 1' ou 'Nome real 2'?"), nunca liste o cardápio inteiro de novo. Só depois que o cliente confirmar, chame update_order_draft de novo com o nome EXATO de uma das opções de "closest", e então tente finalize_order novamente.
 - Se finalize_order retornar "status: handoff_human", pare de tentar sozinha: avise o cliente, de forma natural e tranquila, que um atendente vai continuar o atendimento a partir daqui, e não chame mais nenhuma ferramenta nessa conversa.
-- Se update_order_draft retornar "status: address_incomplete", NÃO tente calcular nem falar taxa. Peça de forma educada somente os campos listados em "missing" (rua, número e/ou bairro). Exemplo: "Para eu verificar a taxa de entrega certinho, poderia me informar o número, por favor?" Nunca abra assunto de pagamento enquanto o endereço estiver incompleto.
+- Se update_order_draft retornar "status: address_incomplete", NÃO tente calcular nem falar taxa. Peça de forma educada somente os campos realmente listados em "missing". O bairro validado no início NÃO deve aparecer como faltante nem ser solicitado outra vez. Exemplo: se já existe bairro e falta somente número, pergunte apenas: "Para eu verificar a taxa de entrega certinho, poderia me informar o número, por favor?" Nunca abra assunto de pagamento enquanto o endereço estiver incompleto.
 - Se finalize_order retornar "status: delivery_fee_unavailable", o sistema não conseguiu calcular a taxa de entrega ainda — peça desculpas, diga que está com uma instabilidade rápida no cálculo do frete, e peça pra confirmar o endereço de novo (rua, número, bairro) pra tentar de novo.
 
 🏪 CLIENTE CITOU UM ESTABELECIMENTO OU PONTO DE REFERÊNCIA EM VEZ DE ENDEREÇO ("entregam no mercado tal?", "perto do posto X", "no condomínio Y"): NUNCA responda que não entrega sem antes chamar a ferramenta lookup_place_address com o nome do lugar. Ela descobre o endereço real, o bairro, e já retorna no campo "atendido" a decisão FINAL sobre se a loja entrega ali (true = entrega, false = não entrega, null = sem lista cadastrada, aí siga as INSTRUÇÕES DO GERENTE). Quando "atendido" vier true ou false, é DEFINITIVO — nunca conteste, reavalie ou compare de novo com a grafia exata do bairro, mesmo que o nome escrito pelo cliente tenha vindo com pequena diferença de acento/letra. Se a ferramenta não achar o lugar ou não identificar o bairro, peça o bairro/rua ao cliente — nunca afirme que não atende.
@@ -1854,6 +1854,21 @@ async function executeTool(
     const addressWasComplete = Boolean(
       draft.address_street?.trim() && draft.address_number?.trim() && draft.address_neighborhood?.trim(),
     );
+
+    // O bairro validado no início da conversa faz parte do pedido atual.
+    // Quando o cliente depois informa apenas rua + número, NUNCA apagamos nem
+    // voltamos a pedir o bairro já confirmado. Só substituímos o bairro quando
+    // o cliente realmente informa outro nome de bairro/localidade.
+    const validatedNeighborhoodAlreadySaved = draft.address_neighborhood
+      ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos) || draft.address_neighborhood
+      : null;
+    if (
+      args.address_neighborhood !== undefined &&
+      (args.address_neighborhood == null || String(args.address_neighborhood).trim() === "") &&
+      validatedNeighborhoodAlreadySaved
+    ) {
+      delete args.address_neighborhood;
+    }
 
     for (const k of [
       "customer_name",
@@ -3891,6 +3906,55 @@ async function handleIncomingMessageUnlocked(
         : (m.body ?? ""),
     }));
 
+  // ============ RECONCILIAÇÃO DETERMINÍSTICA DO BAIRRO ============
+  // A lista POSITIVA ativa de bairros atendidos é a fonte de verdade absoluta.
+  // Se um bairro atendido já foi validado no início do atendimento, ele pertence
+  // ao pedido atual e não pode desaparecer só porque o cliente depois informou
+  // apenas rua + número. Também não permitimos que um out_of_delivery_area antigo
+  // contradiga um bairro que está ATIVO no painel.
+  let canonicalServedNeighborhood = draft.address_neighborhood
+    ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
+    : null;
+
+  // Se o rascunho perdeu o bairro, recupera SOMENTE um bairro real da lista ativa
+  // que já tenha sido informado pelo cliente anteriormente nesta conversa.
+  if (!canonicalServedNeighborhood && bairrosAtendidos.length > 0) {
+    const historicalUserMessages = history
+      .filter((m) => m.role === "user")
+      .map((m) => String(m.content ?? ""))
+      .reverse();
+    for (const oldUserText of historicalUserMessages) {
+      const recovered = findConfiguredBairroMatch(oldUserText, bairrosAtendidos);
+      if (recovered) {
+        canonicalServedNeighborhood = recovered;
+        break;
+      }
+    }
+  }
+
+  if (canonicalServedNeighborhood) {
+    const needsNeighborhoodRepair =
+      normalizeNeighborhoodKey(draft.address_neighborhood) !== normalizeNeighborhoodKey(canonicalServedNeighborhood) ||
+      draft.out_of_delivery_area === true ||
+      draft.delivery_mode !== "delivery";
+
+    draft.address_neighborhood = canonicalServedNeighborhood;
+    draft.out_of_delivery_area = false;
+    if (draft.delivery_mode !== "pickup") draft.delivery_mode = "delivery";
+
+    if (needsNeighborhoodRepair) {
+      await supabaseAdmin
+        .from("order_drafts")
+        .update({
+          address_neighborhood: canonicalServedNeighborhood,
+          out_of_delivery_area: false,
+          delivery_mode: draft.delivery_mode === "pickup" ? "pickup" : "delivery",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("conversation_id", conversation.id);
+    }
+  }
+
   // ============ CAPTURA DETERMINÍSTICA DE PAGAMENTO ============
   // Forma/momento de pagamento são dados transacionais; não dependem da memória
   // probabilística da IA. Interpreta o turno do cliente com o contexto da pergunta
@@ -4135,6 +4199,27 @@ async function handleIncomingMessageUnlocked(
         return Response.json({ ok: true, action: "neighborhood_accepted" });
       }
     } else if (draft.out_of_delivery_area) {
+      // Antes de qualquer redirecionamento, a lista POSITIVA ativa vence.
+      // Se o bairro salvo está ativo no painel, corrige o estado imediatamente
+      // e continua o pedido pelo WhatsApp — nunca manda esse cliente para app.
+      const positiveSavedMatch = draft.address_neighborhood
+        ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
+        : null;
+      if (positiveSavedMatch) {
+        draft.address_neighborhood = positiveSavedMatch;
+        draft.out_of_delivery_area = false;
+        draft.delivery_mode = "delivery";
+        await supabaseAdmin
+          .from("order_drafts")
+          .update({
+            address_neighborhood: positiveSavedMatch,
+            out_of_delivery_area: false,
+            delivery_mode: "delivery",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("conversation_id", conversation.id);
+        // Não retorna aqui: segue o fluxo normal da mensagem atual.
+      } else {
       // O cliente pode corrigir o bairro depois de uma informação anterior.
       // Nunca "prendemos" a conversa no redirecionamento: se ele informar um
       // bairro atendido agora, recuperamos a venda e seguimos pelo WhatsApp.
@@ -4173,6 +4258,7 @@ async function handleIncomingMessageUnlocked(
         formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
       );
       return Response.json({ ok: true, action: "redirect_platforms_existing_neighborhood" });
+      }
     }
   }
 
