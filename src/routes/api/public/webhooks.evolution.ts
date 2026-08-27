@@ -1309,11 +1309,9 @@ function resolveBairroStatus(
 /**
  * Aplica as listas de bairros/ruas atendidos e não atendidos sobre o
  * resultado do cálculo de frete.
- * - Bairro ou rua estão marcados como NÃO atendidos → `outOfArea = true`
- *   SEMPRE, é a checagem de maior prioridade de todas (roda antes de
- *   qualquer outra regra, inclusive antes da lista positiva de bairros
- *   atendidos — um cadastro de bloqueio nunca pode ser "vencido" por outra
- *   fonte).
+ * - Rua explicitamente marcada como NÃO atendida continua sendo exceção de
+ *   endereço. Para BAIRRO, a lista positiva ativa é soberana: se o bairro está
+ *   ativo, ele é atendido mesmo que exista duplicado na lista negativa.
  * - Sem bloqueio e lista de bairros atendidos vazia: não mexe em nada,
  *   mantém o comportamento anterior (só o cálculo por distância decide).
  * - Sem bloqueio e bairro do cliente ESTÁ na lista de atendidos: força
@@ -3016,17 +3014,14 @@ function buildBairrosAtendidosText(bairrosAtendidosText: string | null): string 
   return `\n📍 BAIRROS ATENDIDOS — LISTA OFICIAL CADASTRADA PELA LOJA (fonte de verdade sobre área de entrega, mais confiável que qualquer cálculo por distância): ${bairrosAtendidosText}\nO sistema já confere automaticamente o bairro informado pelo cliente contra essa lista antes de calcular a taxa — se o bairro estiver aqui, o pedido NUNCA será marcado como fora de área, mesmo que o cálculo por km diga o contrário. Se "O QUE JÁ SEI SOBRE O PEDIDO" indicar endereço fora da área mesmo assim, confira se o bairro dito pelo cliente bate com um destes antes de recusar — pode ser erro de digitação ou de grafia (ex: acento, abreviação). Fora dessa lista, siga o fluxo de REDIRECIONAMENTO FORA DE ÁREA (iFood/99Food) descrito no prompt.\n`;
 }
 
-// 🚫 BAIRROS/RUAS NÃO ATENDIDOS — listas negativas explícitas cadastradas
-// pela loja. Têm prioridade MÁXIMA: valem mais até do que a lista de
-// bairros atendidos e do que qualquer instrução solta no texto livre do
-// gerente. O sistema já bloqueia essas áreas em código (applyBairroOverride)
-// antes mesmo da IA responder — este texto é uma segunda camada de
-// segurança, pra IA nunca afirmar o contrário em texto livre (ex: quando o
-// cliente só pergunta "vocês entregam aí?" sem chegar a informar endereço
-// completo, ou cita um bairro/rua sem ainda ter passado por update_order_draft).
+// 🚫 BAIRROS/RUAS NÃO ATENDIDOS — listas negativas explícitas cadastradas.
+// REGRA DE PRECEDÊNCIA: a lista POSITIVA de bairros ativos é soberana para
+// bairro. A lista negativa só pode decidir quando o bairro NÃO estiver ativo
+// em `bairros_atendidos`. Ruas explicitamente bloqueadas continuam sendo uma
+// exceção operacional por endereço.
 function buildBairrosNaoAtendidosText(bairrosNaoAtendidosText: string | null): string {
   if (!bairrosNaoAtendidosText) return "";
-  return `\n🚫 BAIRROS NÃO ATENDIDOS — LISTA OFICIAL CADASTRADA PELA LOJA (bloqueio definitivo, prioridade máxima sobre QUALQUER outra informação deste prompt, inclusive sobre a lista de bairros atendidos e sobre as instruções do gerente): ${bairrosNaoAtendidosText}\nSe o bairro citado ou informado pelo cliente estiver nesta lista (mesmo com pequena diferença de grafia/acento), o entregador fixo da loja NUNCA vai até esse bairro — nunca diga que entrega por WhatsApp, nunca diga "vou verificar", nunca peça o restante do endereço pra "confirmar depois". Mas NÃO diga simplesmente que a loja não entrega ali: siga o fluxo de REDIRECIONAMENTO FORA DE ÁREA (iFood/99Food) descrito no prompt.\n`;
+  return `\n🚫 BAIRROS NÃO ATENDIDOS — LISTA AUXILIAR: ${bairrosNaoAtendidosText}\nIMPORTANTE: esta lista NÃO pode sobrescrever a lista positiva de bairros ATIVOS. Se um bairro estiver ativo em Bairros atendidos, ele é atendido pelo WhatsApp mesmo que exista aqui por engano/duplicidade. Use esta lista somente quando NÃO houver correspondência com nenhum bairro ativo.\n`;
 }
 
 function buildRuasNaoAtendidasText(ruasNaoAtendidasText: string | null): string {
@@ -3840,23 +3835,24 @@ async function handleIncomingMessageUnlocked(
   let bairrosAtendidosText: string | null = null;
   let bairrosAtendidosLoadOk = false;
   try {
-    // IMPORTANTE: não filtra no SQL por `ativo` aqui. Já tivemos versões da
-    // tabela com pequenas diferenças de schema e uma consulta rígida pode
-    // devolver erro/nenhum dado silenciosamente. Carregamos as linhas e
-    // normalizamos em JS, usando a mesma base que a tela de Configurações.
+    // A tela de Configurações grava exatamente `nome` e `ativo` nesta tabela.
+    // O webhook usa o MESMO schema e trata qualquer erro como falha de fonte,
+    // em vez de interpretar silenciosamente lista vazia como "todos externos".
     const { data: bairrosRows, error: bairrosError } = await (supabaseAdmin as any)
       .from("bairros_atendidos")
-      .select("*");
+      .select("id,nome,ativo")
+      .eq("ativo", true)
+      .order("nome");
     if (bairrosError) {
-      console.error("[BAIRRO] falha ao carregar lista oficial:", bairrosError);
+      bairrosAtendidosLoadOk = false;
+      console.error("[BAIRROS_ATENDIDOS] Falha ao carregar lista oficial:", {
+        code: bairrosError.code,
+        message: bairrosError.message,
+      });
     } else {
       bairrosAtendidosLoadOk = true;
       bairrosAtendidos = (bairrosRows ?? [])
-        .filter((r: any) => {
-          const flag = r?.ativo ?? r?.active;
-          return flag === undefined || flag === null ? true : Boolean(flag);
-        })
-        .map((r: any) => String(r?.nome ?? r?.bairro ?? r?.name ?? "").trim())
+        .map((r: any) => String(r?.nome ?? "").trim())
         .filter(Boolean);
       // remove duplicados equivalentes, preservando a grafia cadastrada mais recente
       const seen = new Set<string>();
@@ -3867,37 +3863,27 @@ async function handleIncomingMessageUnlocked(
         return true;
       });
       bairrosAtendidosText = bairrosAtendidos.length ? bairrosAtendidos.join(", ") : null;
-      console.info(`[BAIRRO] bairros ativos carregados: ${bairrosAtendidos.length}`, bairrosAtendidos);
+      console.info("[BAIRROS_ATENDIDOS] Lista oficial carregada", {
+        count: bairrosAtendidos.length,
+        bairros: bairrosAtendidos,
+      });
       if (bairrosAtendidos.length === 0) {
-        console.warn("[BAIRRO] consulta ok mas nenhum bairro ATIVO encontrado no banco do webhook.");
+        console.warn("[BAIRROS_ATENDIDOS] A consulta foi concluída, mas nenhum bairro ATIVO foi encontrado no banco usado pelo webhook.");
       }
     }
   } catch (err) {
-    console.error("[BAIRRO] exceção ao carregar lista oficial:", err);
+    console.error("[BAIRROS_ATENDIDOS] Exceção ao carregar lista oficial:", err);
     bairrosAtendidosLoadOk = false;
   }
 
-  // CORREÇÃO: o supabaseProjectMismatch indica que frontend e backend podem
-  // estar em bancos diferentes, mas NÃO invalida um match positivo real já
-  // carregado. Ele apenas bloqueia redirecionamentos baseados em AUSÊNCIA de
-  // match (fora da área). Se os bairros foram carregados com sucesso,
-  // bairrosAtendidosLoadOk permanece true — um bairro ativo encontrado na
-  // lista é atendido independentemente do mismatch de URL.
-  // O mismatch continua sendo logado como alerta para investigação.
-  if (supabaseProjectMismatch) {
-    console.warn(
-      "[BAIRRO] AVISO: SUPABASE_URL e VITE_SUPABASE_URL diferem — verifique se frontend e webhook apontam para o mesmo projeto. " +
-      "Match positivo na lista de bairros ativos continua sendo honrado. " +
-      "Apenas redirecionamentos por ausência de match ficam bloqueados por segurança.",
-    );
-    // NÃO zeramos bairrosAtendidosLoadOk aqui. A lista já foi carregada;
-    // um bairro encontrado nela é atendido. O que bloqueamos é o portão que
-    // rejeita bairros desconhecidos — esse fica sob proteção do flag abaixo.
-  }
+  // Em caso de mismatch conhecido entre o banco do frontend e o do backend,
+  // a lista lida aqui NÃO pode ser tratada como fonte confiável para mandar
+  // cliente para plataforma.
+  if (supabaseProjectMismatch) bairrosAtendidosLoadOk = false;
 
   // carrega a lista de BAIRROS NÃO ATENDIDOS (Configurações → Bairros não
-  // atendidos) — bloqueio explícito, checado em código com prioridade máxima
-  // (antes até da lista de bairros atendidos), ver applyBairroOverride().
+  // atendidos). Ela é apenas auxiliar: um bairro ATIVO em `bairros_atendidos`
+  // sempre vence eventual duplicidade nesta lista.
   let bairrosNaoAtendidos: string[] = [];
   let bairrosNaoAtendidosText: string | null = null;
   try {
@@ -4094,13 +4080,7 @@ async function handleIncomingMessageUnlocked(
   // Para decisões de entrega, preço/promoção, cardápio e continuidade do pedido,
   // o bairro precisa ser validado. Bairro atendido segue pelo WhatsApp; bairro
   // externo segue pelas plataformas. Retirada não exige bairro.
-  //
-  // NOTA SOBRE supabaseProjectMismatch: após a correção, o mismatch de URL não
-  // zera mais bairrosAtendidosLoadOk. Portanto este portão roda normalmente
-  // mesmo quando as URLs diferem, desde que a lista tenha sido carregada sem erro.
-  // O que o mismatch bloqueia é apenas o redirecionamento por "ausência" de match
-  // — tratado no bloco de segurança mais abaixo (bairrosAtendidosLoadOk = false).
-  if (bairrosAtendidosLoadOk && bairrosAtendidos.length > 0 && draft.delivery_mode !== "pickup") {
+  if (bairrosAtendidosLoadOk && draft.delivery_mode !== "pickup") {
     if (looksLikePickupIntent(text)) {
       draft.delivery_mode = "pickup";
       draft.out_of_delivery_area = false;
@@ -4112,37 +4092,26 @@ async function handleIncomingMessageUnlocked(
       const previousAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
       const awaitingNeighborhood = /bairro/i.test(previousAssistant) && /(informe|qual|diga)/i.test(previousAssistant);
       const pendingSpecial = pendingSpecialNeighborhoodFromHistory(history);
+      // Compatibilidade com conversas antigas: se havia uma pergunta especial
+      // pendente, a lista ATIVA atual continua soberana. Se esse bairro está
+      // ativo agora, aceita imediatamente; nunca redireciona por regra legada.
       if (pendingSpecial) {
-        const special = specialNeighborhoodDecision(pendingSpecial, text);
-        if (special === "allow") {
+        const pendingActiveMatch = findConfiguredBairroMatch(pendingSpecial, bairrosAtendidos);
+        if (pendingActiveMatch) {
           draft.delivery_mode = "delivery";
-          draft.address_neighborhood = pendingSpecial;
+          draft.address_neighborhood = pendingActiveMatch;
           draft.out_of_delivery_area = false;
           await supabaseAdmin
             .from("order_drafts")
             .update({
               delivery_mode: "delivery",
-              address_neighborhood: pendingSpecial,
+              address_neighborhood: pendingActiveMatch,
               out_of_delivery_area: false,
               updated_at: new Date().toISOString(),
             })
             .eq("conversation_id", conversation.id);
           await replyAndLog(supabaseAdmin, conversation.id, phone, "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?");
-          return Response.json({ ok: true, action: "special_neighborhood_accepted" });
-        }
-        if (special === "redirect") {
-          await replyAndLog(
-            supabaseAdmin,
-            conversation.id,
-            phone,
-            formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
-          );
-          return Response.json({ ok: true, action: "special_neighborhood_redirect" });
-        }
-        const q = specialNeighborhoodQuestion(pendingSpecial);
-        if (q) {
-          await replyAndLog(supabaseAdmin, conversation.id, phone, q);
-          return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
+          return Response.json({ ok: true, action: "legacy_special_neighborhood_recovered_as_active" });
         }
       }
 
@@ -4150,39 +4119,16 @@ async function handleIncomingMessageUnlocked(
       // negativa ou heurística, compara a mensagem diretamente com TODOS os
       // bairros ATIVOS configurados no painel. Se houver match, o bairro é
       // atendido e nenhuma outra regra pode reclassificá-lo como externo.
-      console.info(`[BAIRRO] texto recebido: ${text}`);
       const directActiveNeighborhoodMatch = findConfiguredBairroMatch(text, bairrosAtendidos);
       if (directActiveNeighborhoodMatch) {
-        // REGRA INVIOLÁVEL: um bairro encontrado na lista POSITIVA ATIVA é
-        // SEMPRE atendido. specialNeighborhoodDecision pode pedir detalhes
-        // adicionais ("ask") para bairros com sub-regiões distintas (ex:
-        // Gramacho, Corte 8), mas NUNCA pode redirecionar ("redirect") um
-        // bairro que o gerente explicitamente cadastrou como atendido.
-        // Se o gerente quis bloquear esse bairro, ele deve removê-lo da lista
-        // ativa, não depender de regras especiais hardcoded.
-        console.info(`[BAIRRO] match positivo na lista ativa: ${directActiveNeighborhoodMatch}`);
-        const directSpecial = specialNeighborhoodDecision(directActiveNeighborhoodMatch, text);
-        if (directSpecial === "ask") {
-          const q = specialNeighborhoodQuestion(directActiveNeighborhoodMatch);
-          if (q) {
-            console.info(`[BAIRRO] bairro especial — pedindo detalhe de sub-região: ${directActiveNeighborhoodMatch}`);
-            await replyAndLog(supabaseAdmin, conversation.id, phone, q);
-            return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
-          }
-        }
-        // CORREÇÃO: "redirect" de specialNeighborhoodDecision NÃO pode sobrescrever
-        // um match positivo na lista ativa. Se o bairro está cadastrado como atendido,
-        // ele é atendido — independentemente de qualquer lógica de sub-região.
-        // O bloco anterior de "redirect" foi removido propositalmente.
-        if (directSpecial === "redirect") {
-          console.warn(
-            `[BAIRRO] AVISO: specialNeighborhoodDecision retornou "redirect" para "${directActiveNeighborhoodMatch}", ` +
-            `que está na lista ATIVA de bairros atendidos. Ignorando o redirect — bairro ativo vence. ` +
-            `Se quiser bloquear esta sub-região, remova o bairro da lista ativa no painel.`,
-          );
-          // Cai no bloco de aceite abaixo (não retorna aqui).
-        }
-
+        // DECISÃO FINAL E SOBERANA: se houve match com um bairro ATIVO do painel,
+        // nenhuma regra especial, lista negativa, heurística, histórico ou cálculo
+        // por distância pode transformar este cliente em "fora da área".
+        console.info("[DELIVERY_AREA] bairro ativo reconhecido", {
+          input: text,
+          match: directActiveNeighborhoodMatch,
+          decision: "WHATSAPP",
+        });
         draft.delivery_mode = "delivery";
         draft.address_neighborhood = directActiveNeighborhoodMatch;
         draft.out_of_delivery_area = false;
@@ -4196,7 +4142,6 @@ async function handleIncomingMessageUnlocked(
           })
           .eq("conversation_id", conversation.id);
 
-        console.info(`[BAIRRO] decisão final: WHATSAPP — bairro atendido: ${directActiveNeighborhoodMatch}`);
         await replyAndLog(
           supabaseAdmin,
           conversation.id,
@@ -4205,7 +4150,6 @@ async function handleIncomingMessageUnlocked(
         );
         return Response.json({ ok: true, action: "active_neighborhood_accepted_directly" });
       }
-      console.info(`[BAIRRO] sem match positivo na lista ativa para: ${text}`);
 
       const pendingNeighborhoodConfirmation = pendingNeighborhoodConfirmationFromHistory(history);
       let candidate = extractNeighborhoodCandidate(
@@ -4247,64 +4191,82 @@ async function handleIncomingMessageUnlocked(
       }
 
       const candidateValue = candidate.value;
-      const special = specialNeighborhoodDecision(candidateValue, text);
-      if (special === "ask") {
-        const q = specialNeighborhoodQuestion(candidateValue);
-        if (q) {
-          await replyAndLog(supabaseAdmin, conversation.id, phone, q);
-          return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
-        }
-      }
-      if (special === "redirect") {
-        await replyAndLog(
-          supabaseAdmin,
-          conversation.id,
-          phone,
-          formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
-        );
-        return Response.json({ ok: true, action: "special_neighborhood_redirect" });
-      }
 
+      // A lista POSITIVA ativa decide primeiro e de forma definitiva.
       const attendedMatch = findConfiguredBairroMatch(candidateValue, bairrosAtendidos);
-      // Lista positiva ativa vence qualquer cadastro negativo antigo/duplicado.
-      const blockedMatch = attendedMatch ? null : findConfiguredBairroMatch(candidateValue, bairrosNaoAtendidos);
-      const blocked = !!blockedMatch;
-      const attended = special === "allow" || !!attendedMatch;
-      const isKnown = blocked || attended;
-      // Quando houve match na lista ATIVA, salva a própria grafia cadastrada no
-      // painel. Isso impede que um alias municipal fique gravado como se fosse
-      // outro bairro e garante consistência nas próximas rodadas.
-      const resolvedCandidateValue = attendedMatch || blockedMatch || candidateValue;
+      if (attendedMatch) {
+        draft.delivery_mode = "delivery";
+        draft.address_neighborhood = attendedMatch;
+        draft.out_of_delivery_area = false;
+        await supabaseAdmin
+          .from("order_drafts")
+          .update({
+            delivery_mode: "delivery",
+            address_neighborhood: attendedMatch,
+            out_of_delivery_area: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("conversation_id", conversation.id);
 
-      // REGRA DE SEGURANÇA: "não reconhecido" nunca significa "fora da área".
-      // Só uma localidade comprovadamente reconhecida pode seguir para a decisão
-      // entrega própria x plataformas. Isso impede frases aleatórias de virarem
-      // bairros externos e causarem perda de venda.
-      const recognizedMunicipalityLocality = candidate.source === "known" || isKnown;
-      if (!recognizedMunicipalityLocality) {
-        await replyAndLog(
-          supabaseAdmin,
-          conversation.id,
-          phone,
-          "Não consegui identificar esse nome como um bairro/localidade de Duque de Caxias. Pode conferir e me informar somente o nome do bairro, por favor?",
-        );
-        return Response.json({ ok: true, action: "neighborhood_not_recognized" });
-      }
+        console.info("[DELIVERY_AREA] decisão final", {
+          input: text,
+          normalized: normalizeNeighborhoodKey(text),
+          match: attendedMatch,
+          decision: "WHATSAPP",
+        });
 
-      draft.delivery_mode = "delivery";
-      draft.address_neighborhood = resolvedCandidateValue;
-      draft.out_of_delivery_area = !attended;
-      await supabaseAdmin
-        .from("order_drafts")
-        .update({
-          delivery_mode: "delivery",
-          address_neighborhood: resolvedCandidateValue,
-          out_of_delivery_area: !attended,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("conversation_id", conversation.id);
+        const onlyNeighborhood =
+          similarity(normalizeNeighborhoodKey(text), normalizeNeighborhoodKey(attendedMatch)) >= 0.9 &&
+          normalizeNeighborhoodKey(text).length <= normalizeNeighborhoodKey(attendedMatch).length + 8;
+        if (onlyNeighborhood || awaitingNeighborhood) {
+          await replyAndLog(
+            supabaseAdmin,
+            conversation.id,
+            phone,
+            "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
+          );
+          return Response.json({ ok: true, action: "neighborhood_accepted" });
+        }
+        // Se a mesma mensagem contém bairro + outro pedido/pergunta, segue o
+        // fluxo normal da IA já com o bairro travado como atendido.
+      } else {
+        // Somente um bairro/localidade REALMENTE reconhecido e AUSENTE da lista
+        // positiva pode ser enviado às plataformas. Texto aleatório nunca vira
+        // automaticamente "fora da área".
+        const blockedMatch = findConfiguredBairroMatch(candidateValue, bairrosNaoAtendidos);
+        const recognizedMunicipalityLocality = candidate.source === "known" || !!blockedMatch;
+        if (!recognizedMunicipalityLocality) {
+          await replyAndLog(
+            supabaseAdmin,
+            conversation.id,
+            phone,
+            "Não consegui identificar esse nome como um bairro/localidade de Duque de Caxias. Pode conferir e me informar somente o nome do bairro, por favor?",
+          );
+          return Response.json({ ok: true, action: "neighborhood_not_recognized" });
+        }
 
-      if (!attended) {
+        const externalNeighborhood = blockedMatch || candidateValue;
+        draft.delivery_mode = "delivery";
+        draft.address_neighborhood = externalNeighborhood;
+        draft.out_of_delivery_area = true;
+        await supabaseAdmin
+          .from("order_drafts")
+          .update({
+            delivery_mode: "delivery",
+            address_neighborhood: externalNeighborhood,
+            out_of_delivery_area: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("conversation_id", conversation.id);
+
+        console.info("[DELIVERY_AREA] decisão final", {
+          input: text,
+          normalized: normalizeNeighborhoodKey(text),
+          activeMatch: null,
+          recognizedLocality: externalNeighborhood,
+          decision: "PLATAFORMA",
+        });
+
         await replyAndLog(
           supabaseAdmin,
           conversation.id,
@@ -4312,22 +4274,6 @@ async function handleIncomingMessageUnlocked(
           formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
         );
         return Response.json({ ok: true, action: "redirect_platforms_by_neighborhood" });
-      }
-
-      // Se a mensagem foi apenas a resposta do bairro, não desperdiça uma
-      // chamada de IA: confirma a cobertura e abre espaço para o cliente dizer
-      // o que deseja. Se ele já incluiu outra pergunta na mesma mensagem, segue
-      // para a IA agora que o bairro está validado.
-      const normalized = normalizeStreet(text);
-      const onlyNeighborhood = similarity(normalizeNeighborhoodKey(text), normalizeNeighborhoodKey(resolvedCandidateValue)) >= 0.9 && normalizeNeighborhoodKey(text).length <= normalizeNeighborhoodKey(resolvedCandidateValue).length + 8;
-      if (onlyNeighborhood) {
-        await replyAndLog(
-          supabaseAdmin,
-          conversation.id,
-          phone,
-          "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
-        );
-        return Response.json({ ok: true, action: "neighborhood_accepted" });
       }
     } else if (draft.out_of_delivery_area) {
       // Antes de qualquer redirecionamento, a lista POSITIVA ativa vence.
@@ -4646,83 +4592,5 @@ export async function handleIncomingMessage(
     return await handleIncomingMessageUnlocked(payload, opts);
   } finally {
     await releaseWhatsappProcessingLock(supabaseAdmin, phone);
-  }
-}
-
-// ============================================================
-// TESTE DE COBERTURA DE BAIRROS ATIVOS
-// ============================================================
-// Percorre todos os bairros ativos cadastrados e garante que cada um
-// resultaria em decisão WHATSAPP (nunca redirecionamento para plataforma).
-//
-// Como usar: chame testBairrosAtivosCobertura(supabaseAdmin) em um endpoint
-// de diagnóstico ou no console do servidor (ex: Railway shell).
-//
-// Exemplo de saída esperada:
-//   [BAIRRO-TEST] Vila São Luís => WHATSAPP ✓
-//   [BAIRRO-TEST] Chacrinha => WHATSAPP ✓
-//   [BAIRRO-TEST] Jardim Gramacho => WHATSAPP ✓
-//   [BAIRRO-TEST] RESULTADO: 13/13 ativos OK — nenhum redirecionamento indevido.
-export async function testBairrosAtivosCobertura(supabaseAdmin: any): Promise<void> {
-  console.info("[BAIRRO-TEST] Iniciando teste de cobertura de bairros ativos...");
-
-  const { data: rows, error } = await supabaseAdmin
-    .from("bairros_atendidos")
-    .select("nome, ativo");
-
-  if (error) {
-    console.error("[BAIRRO-TEST] Falha ao carregar tabela bairros_atendidos:", error);
-    return;
-  }
-
-  const ativos: string[] = (rows ?? [])
-    .filter((r: any) => {
-      const flag = r?.ativo ?? r?.active;
-      return flag === undefined || flag === null ? true : Boolean(flag);
-    })
-    .map((r: any) => String(r?.nome ?? r?.bairro ?? r?.name ?? "").trim())
-    .filter(Boolean);
-
-  if (ativos.length === 0) {
-    console.warn("[BAIRRO-TEST] Nenhum bairro ativo encontrado. Verifique a tabela bairros_atendidos.");
-    return;
-  }
-
-  console.info(`[BAIRRO-TEST] ${ativos.length} bairros ativos para testar:`, ativos);
-
-  let ok = 0;
-  let falhas: string[] = [];
-
-  for (const nome of ativos) {
-    // Simula o que o webhook faz: tenta match do próprio nome contra a lista
-    const match = findConfiguredBairroMatch(nome, ativos);
-    if (match) {
-      console.info(`[BAIRRO-TEST] ${nome} => WHATSAPP ✓ (match: ${match})`);
-      ok++;
-    } else {
-      // Isso nunca deveria acontecer — o bairro deve encontrar a si mesmo
-      console.error(`[BAIRRO-TEST] ${nome} => FALHA — bairro ativo não encontrou match contra a própria lista! Normalização quebrada?`);
-      falhas.push(nome);
-    }
-
-    // Também testa variações comuns de escrita
-    const variantes = [
-      nome.toLowerCase(),
-      nome.toUpperCase(),
-      nome.normalize("NFD").replace(/[\u0300-\u036f]/g, ""), // sem acentos
-    ];
-    for (const v of variantes) {
-      const vm = findConfiguredBairroMatch(v, ativos);
-      if (!vm) {
-        console.warn(`[BAIRRO-TEST] ${nome} — variante "${v}" não encontrou match. Verificar normalização.`);
-      }
-    }
-  }
-
-  if (falhas.length === 0) {
-    console.info(`[BAIRRO-TEST] RESULTADO: ${ok}/${ativos.length} ativos OK — nenhum redirecionamento indevido.`);
-  } else {
-    console.error(`[BAIRRO-TEST] RESULTADO: ${falhas.length} FALHA(S) detectadas:`, falhas);
-    console.error("[BAIRRO-TEST] Bairros com falha precisam de correção na normalizeNeighborhoodKey.");
   }
 }
