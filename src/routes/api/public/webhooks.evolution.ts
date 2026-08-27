@@ -4203,7 +4203,7 @@ export async function handleIncomingMessage(
         preloggedText: combinedText || incomingText,
         skipTextLog: true,
       });
-
+       //teste
       // Só marca como processado depois que o turno terminou com sucesso.
       // Mensagens que chegarem DURANTE a resposta não pertencem a batchIds e
       // continuam pendentes para o próximo turno — nunca somem silenciosamente.
