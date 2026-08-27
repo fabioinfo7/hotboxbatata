@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { MapPin, Phone, Truck, Timer, Info } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -43,6 +45,7 @@ export function FreightApprovalPopup() {
   const [item, setItem] = useState<Approval | null>(null);
   const [left, setLeft] = useState(30);
   const [costPerKm, setCostPerKm] = useState(0.9);
+  const [manualFee, setManualFee] = useState("");
   const busy = useRef(false);
 
   // custo por km pago ao entregador (Configurações → Entrega)
@@ -106,6 +109,7 @@ export function FreightApprovalPopup() {
   useEffect(() => {
     if (!item) return;
     busy.current = false;
+    setManualFee(item.fee != null ? String(Number(item.fee).toFixed(2)).replace(".", ",") : "");
     const tick = () => {
       const secs = Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - Date.now()) / 1000));
       setLeft(secs);
@@ -118,10 +122,19 @@ export function FreightApprovalPopup() {
 
   async function resolve(status: "approved" | "rejected") {
     if (!item || busy.current) return;
+    const parsedFee = Number(manualFee.replace(",", "."));
+    if (status === "approved" && (!Number.isFinite(parsedFee) || parsedFee < 0)) {
+      toast.error("Informe um valor de entrega válido");
+      return;
+    }
     busy.current = true;
     const { error } = await supabase
       .from("pending_freight_approvals")
-      .update({ status, resolved_at: new Date().toISOString() })
+      .update({
+        status,
+        fee: status === "approved" ? parsedFee : item.fee,
+        resolved_at: new Date().toISOString(),
+      })
       .eq("id", item.id)
       .eq("status", "pending");
     if (error) {
@@ -131,7 +144,7 @@ export function FreightApprovalPopup() {
     }
     toast[status === "approved" ? "success" : "info"](
       status === "approved"
-        ? "Valor liberado — a IA vai informar ao cliente."
+        ? `Valor ${brl(parsedFee)} liberado — a IA vai informar ao cliente.`
         : "Conversa passou para atendimento manual.",
     );
     setItem(null);
@@ -152,7 +165,7 @@ export function FreightApprovalPopup() {
 
         <div className="space-y-4 p-5">
           <p className="text-sm text-muted-foreground">
-            A IA calculou a taxa abaixo. Posso informar esse valor ao cliente?
+            O sistema calculou uma taxa. Se quiser, altere o valor abaixo e clique em enviar. Se não fizer nada, em até 30 segundos a IA usa o valor calculado e continua o atendimento automaticamente.
           </p>
 
           <div className="rounded-xl bg-muted/50 p-4">
@@ -196,16 +209,35 @@ export function FreightApprovalPopup() {
             </div>
           </div>
 
+
+          <div className="space-y-2 rounded-xl border bg-background p-4">
+            <Label htmlFor="manual-freight-fee" className="font-semibold">Valor que será informado ao cliente</Label>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold text-muted-foreground">R$</span>
+              <Input
+                id="manual-freight-fee"
+                inputMode="decimal"
+                value={manualFee}
+                onChange={(e) => setManualFee(e.target.value.replace(/[^0-9,.-]/g, ""))}
+                placeholder="0,00"
+                className="text-lg font-bold"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Você pode manter o valor calculado ou digitar outro valor. Ao enviar, esse será o valor salvo no pedido e informado pela IA.
+            </p>
+          </div>
+
           <div className="flex gap-2">
             <Button className="flex-1" size="lg" onClick={() => resolve("approved")}>
-              Sim, pode informar
+              Informar este valor
             </Button>
             <Button className="flex-1" size="lg" variant="outline" onClick={() => resolve("rejected")}>
-              Não, eu respondo
+              Assumir conversa
             </Button>
           </div>
           <p className="text-center text-[11px] text-muted-foreground">
-            Sem resposta em {left}s, a IA informa o valor calculado automaticamente.
+            Sem resposta em {left}s, a IA usa o valor originalmente calculado e continua automaticamente.
           </p>
         </div>
       </div>
