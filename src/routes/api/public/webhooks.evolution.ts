@@ -1132,13 +1132,13 @@ Regras importantes:
 - NUNCA invente informação que não está listada acima (produto, categoria, ingrediente, preço, prazo, promoção). Se genuinamente não tiver a informação, diga que vai confirmar com a loja — mas isso deve ser raríssimo, porque quase tudo já está descrito acima.
 - Sempre que o cliente informar ou confirmar algo das categorias acima, chame update_order_draft com os campos atualizados — pode chamar várias vezes na mesma conversa.
 - Nunca repita uma pergunta sobre algo que já está em "o que já sei acima".
-- 🚨 CONFIRMAÇÃO FINAL OBRIGATÓRIA: É PROIBIDO pedir confirmação enquanto faltar qualquer dado obrigatório. Primeiro complete itens + nome + endereço atual + taxa + forma de pagamento. NÃO existe pergunta adicional sobre crédito/débito nem sobre pagamento agora/na entrega. Se não houver bebida, o backend oferece as bebidas ativas UMA VEZ e aguarda a resposta. Depois disso, chame finalize_order: o BACKEND enviará UMA ÚNICA VEZ o resumo oficial, sempre com itens e valores, endereço, pagamento, subtotal, taxa e *TOTAL A PAGAR*, terminando com "Posso fechar o pedido?". Não escreva outro resumo. Na PRIMEIRA resposta afirmativa do cliente, o backend informa o prazo de até 40 minutos e cria o pedido automaticamente na mesma rodada, sem aguardar nova aprovação.
+- 🚨 CONFIRMAÇÃO FINAL OBRIGATÓRIA: É PROIBIDO pedir confirmação enquanto faltar qualquer dado obrigatório. Primeiro complete itens + nome + endereço atual + taxa + forma de pagamento. NÃO existe pergunta adicional sobre crédito/débito nem sobre pagamento agora/na entrega. Se não houver bebida, o BACKEND oferece as bebidas ativas UMA VEZ e aguarda a resposta. Se o cliente adicionar bebida, atualize os itens; se recusar, apenas siga. IMEDIATAMENTE depois da resposta sobre bebida, o BACKEND deve enviar UMA ÚNICA VEZ o resumo oficial com cada item e valor, endereço, pagamento, subtotal, taxa e *TOTAL A PAGAR*, terminando com "Está tudo certo? Posso fechar o pedido?". É PROIBIDO pular o resumo e perguntar apenas "posso finalizar?". Na PRIMEIRA resposta afirmativa ao resumo, o backend informa o prazo de até 40 minutos e cria o pedido automaticamente NA MESMA RODADA, sem aguardar nova aprovação e sem ficar em silêncio.
 - 🚨 NOME DO CLIENTE É OBRIGATÓRIO — SEMPRE: antes de chamar finalize_order, o campo customer_name PRECISA estar preenchido com um nome real dito pelo cliente NESTA conversa. Se você ainda não sabe o nome, NÃO chame finalize_order — pergunte primeiro, de forma natural (ex: "pra fechar aqui, qual o nome pra colocar no pedido?"). Nunca use o nome do WhatsApp (pushName) sem confirmar com o cliente que é ele mesmo. Nunca finalize com nome vazio, nem com "Cliente", "Sem nome" ou qualquer variação genérica.
 - IMPORTANTE: o resumo em "O QUE JÁ SEI" pode conter dados de uma sessão antiga que o cliente nunca confirmou agora — nunca finalize só porque os campos aparecem preenchidos ali. Só finalize se você consegue apontar, na conversa atual, o momento em que o cliente confirmou cada dado.
 - Nunca finalize sem o cliente ter claramente confirmado os itens do pedido.
 - Se o cliente perguntar sobre ingredientes, sabores, bebidas, preços, tempo ou taxa de entrega, responda com base EXATAMENTE nas informações acima. Para ingredientes, use prioritariamente o campo “Ingredientes” exibido no CARDÁPIO ATIVO, que vem do cadastro do produto; nunca invente. Se aparecer “Ingredientes: não cadastrados”, diga apenas que vai confirmar a composição com a equipe antes de garantir. Se o campo Ingredientes de um produto não mencionar um ingrediente específico que o cliente perguntou (ex: "tem queijo?", "vem com bacon?"), NUNCA chute — responda com naturalidade que vai confirmar essa informação com a cozinha antes de garantir. Nunca prometa complemento, molho, acompanhamento ou variação que não esteja informado no cadastro do produto.
 - Se pedirem algo que não existe no cardápio, diga com naturalidade que não tem esse item e sugira o mais parecido do cardápio.
-- 🚨 VALOR DA TAXA DE ENTREGA — REGRA INVIOLÁVEL: você NUNCA escreve um valor de taxa de entrega que não tenha vindo, nesta conversa, no campo "delivery_fee" retornado por update_order_draft. É PROIBIDO estimar, chutar, arredondar, repetir valor de uma conversa antiga, deduzir por bairro/distância ou dizer "deve ficar em torno de R$ X". Enquanto esse campo não voltar com um número, a única resposta permitida sobre frete é dizer que vai confirmar o valor exato da entrega para aquele endereço. Cada valor informado passa por uma conferência da loja antes de ser liberado — mandar um valor por conta própria antes disso é o erro mais grave possível.
+- 🚨 VALOR DA TAXA DE ENTREGA — REGRA INVIOLÁVEL: você NUNCA escreve um valor de taxa de entrega que não tenha vindo, nesta conversa, no campo "delivery_fee" retornado por update_order_draft. É PROIBIDO estimar, chutar, arredondar, repetir valor de uma conversa antiga, deduzir por bairro/distância ou dizer "deve ficar em torno de R$ X". Quando o endereço completo é informado, o sistema abre uma janela de até 30 segundos para a loja manter ou editar o valor da entrega. O valor liberado pelo popup passa a ser a fonte de verdade e deve ser salvo no rascunho. Se a taxa já estiver salva/informada para o MESMO endereço, NÃO peça novo cálculo e NÃO gere outro popup. Enquanto esse campo não voltar com um número, apenas diga que vai confirmar o valor exato.
 - 🚨 TAXA DE ENTREGA: sempre que update_order_draft retornar "delivery_fee" (ou o valor aparecer em "o que já sei acima"), sua PRÓXIMA mensagem OBRIGATORIAMENTE informa esse valor ao cliente, de forma direta ("A taxa de entrega para esse endereço é R$ X,XX."), e já segue para o próximo passo do pedido. Nunca continue o atendimento sem ter informado a taxa. Use exatamente o valor retornado, sem arredondar nem estimar.
 - Estilo: direto, profissional e natural. Sem gírias, sem rodeios, sem enrolação, sem frases decorativas. Uma resposta objetiva por vez, só com o que foi pedido ou o que falta para fechar o pedido.
 - Se o endereço estiver marcado como fora da área de entrega, NÃO diga simplesmente que a loja não entrega nessa região — siga o fluxo de REDIRECIONAMENTO FORA DE ÁREA (iFood/99Food) descrito mais abaixo, e não finalize o pedido.
@@ -1744,6 +1744,16 @@ function isExplicitNegative(text: string): boolean {
   return ["nao", "não", "nao e", "não é", "errado", "outro", "outro bairro"].includes(t);
 }
 
+function isBeverageDecline(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.!?]/g, "").trim();
+  return /^(nao|não|nao obrigado|não obrigado|nao obrigada|não obrigada|sem bebida|sem refrigerante|so isso|só isso|pode fechar|pode seguir)$/.test(t);
+}
+
+function isBeverageOfferMessage(text: string): boolean {
+  const t = normalizeStreet(text);
+  return /(algo pra beber|algo para beber|alguma bebida|gostaria de acrescentar algo para beber|quer.*bebida|quer.*refrigerante)/.test(t);
+}
+
 type SpecialNeighborhoodDecision = "allow" | "redirect" | "ask" | null;
 
 function specialNeighborhoodDecision(neighborhood: string, text: string): SpecialNeighborhoodDecision {
@@ -1893,7 +1903,7 @@ async function executeTool(
     // recalcular e reabrir o popup de aprovação por causa de diferenças
     // triviais de digitação/maiúsculas entre uma chamada e outra do mesmo
     // endereço já aprovado.
-    const normalizeAddr = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const normalizeAddr = (s: string) => normalizeStreet(s).replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
     const addressIsComplete = Boolean(
       draft.address_street?.trim() && draft.address_number?.trim() && draft.address_neighborhood?.trim(),
     );
@@ -1972,7 +1982,7 @@ async function executeTool(
               fee: Number(result.fee),
               distanceKm: result.distanceKm ?? null,
             });
-            if (outcome === "rejected") {
+            if (outcome.status === "rejected") {
               await supabaseAdmin.from("whatsapp_conversations").update({ bot_paused: true }).eq("id", conversation.id);
               if (ctx.flags) ctx.flags.silenced = true;
               return {
@@ -1982,6 +1992,7 @@ async function executeTool(
                 },
               };
             }
+            if (outcome.fee != null) result.fee = Number(outcome.fee);
           }
           draft.estimated_delivery_fee = result.fee;
           draft.estimated_distance_km = result.distanceKm;
@@ -2022,6 +2033,55 @@ async function executeTool(
 
     patch.updated_at = new Date().toISOString();
     await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversation.id);
+
+    // Se esta atualização aconteceu depois da oferta de bebida e agora todos
+    // os dados estão completos, o BACKEND envia o resumo imediatamente. Isso
+    // evita depender de a IA lembrar de chamar finalize_order depois de adicionar
+    // a bebida — exatamente o caso que deixava a conversa parada após o Guaraná.
+    if (!ctx.finalConfirmationAllowed) {
+      const { data: recentFlow } = await supabaseAdmin
+        .from("whatsapp_messages")
+        .select("direction,body,created_at")
+        .eq("conversation_id", conversation.id)
+        .not("body", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(16);
+      const flowChronological = (recentFlow ?? []).reverse();
+      let lastDrinkOffer = -1;
+      for (let i = 0; i < flowChronological.length; i++) {
+        const m: any = flowChronological[i];
+        if (m.direction === "out" && isBeverageOfferMessage(String(m.body ?? ""))) lastDrinkOffer = i;
+      }
+      const drinkOfferAnswered =
+        lastDrinkOffer >= 0 && flowChronological.slice(lastDrinkOffer + 1).some((m: any) => m.direction === "in");
+      const structurallyComplete =
+        Boolean(draft.customer_name && draft.delivery_mode && draft.items?.length && draft.payment_method) &&
+        (draft.delivery_mode === "pickup" ||
+          Boolean(draft.address_street && draft.address_number && draft.address_neighborhood && draft.estimated_delivery_fee != null));
+
+      if (drinkOfferAnswered && structurallyComplete) {
+        const finalSummary = await buildFinalConfirmationSummary(supabaseAdmin, draft);
+        if (!finalSummary.unmatched.length) {
+          draft.awaiting_final_confirmation = true;
+          await supabaseAdmin
+            .from("order_drafts")
+            .update({ awaiting_final_confirmation: true, updated_at: new Date().toISOString() })
+            .eq("conversation_id", conversation.id);
+          await replyAndLog(supabaseAdmin, conversation.id, conversation.phone, finalSummary.text, { systemMessage: true });
+          if (ctx.flags) ctx.flags.silenced = true;
+          return {
+            result: {
+              status: "final_confirmation_summary_sent",
+              subtotal: finalSummary.subtotal,
+              delivery_fee: finalSummary.deliveryFee,
+              total: finalSummary.total,
+              instruction: "Resumo oficial enviado pelo backend. Aguarde somente a confirmação do cliente.",
+            },
+          };
+        }
+      }
+    }
+
     // Devolve a taxa calculada junto do resultado: sem isso a IA não sabia o
     // valor liberado e seguia a conversa sem informar o frete ao cliente.
     return {
@@ -3079,6 +3139,35 @@ async function runConversationalTurn(opts: {
     return -1;
   })();
   const lastUserText = lastUserIndex >= 0 ? (opts.history[lastUserIndex]?.content ?? "") : "";
+
+  // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
+  // disser que não quer bebida, o backend gera imediatamente o resumo oficial
+  // com TOTAL e pede a única confirmação final.
+  const previousAssistantText = lastUserIndex > 0
+    ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
+    : "";
+  if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
+    const directSummary = await executeTool("finalize_order", {}, {
+      supabaseAdmin: opts.supabaseAdmin,
+      conversation: opts.conversation,
+      draft: opts.draft,
+      flags,
+      finalConfirmationAllowed: false,
+      bairrosAtendidos: opts.bairrosAtendidos,
+      bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
+      ruasNaoAtendidas: opts.ruasNaoAtendidas,
+    });
+    if (flags.silenced || directSummary.result?.status === "final_confirmation_summary_sent") {
+      return {
+        silenced: true,
+        finalText: "",
+        pixBlock: null,
+        pixKeyLabel: null,
+        pixKeyMessage: null,
+        sendMenuImage: false,
+      };
+    }
+  }
 
   // A confirmação final não depende mais de uma frase exata da IA. Procura a
   // última mensagem real do atendente imediatamente antes da resposta atual,
