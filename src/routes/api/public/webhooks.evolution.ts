@@ -3726,6 +3726,58 @@ async function handleIncomingMessageUnlocked(
   // primeiro identificamos o bairro: atendido => cardápio/preços do WhatsApp;
   // externo => plataformas, sem expor o cardápio/preços do WhatsApp. Retirada é exceção.
 
+  // ============ TRAVA DE BAIRRO ATENDIDO + "SIM" PARA CARDÁPIO ============
+  // Depois que o sistema aceitou um bairro atendido e perguntou
+  // "Gostaria de ver nosso cardápio?", uma resposta curta como "sim" NÃO pode
+  // voltar para a classificação de bairro. Esse era o bug que fazia Vila São Luís
+  // ser aceita e, no turno seguinte, o cliente ser redirecionado para iFood/99Food.
+  const previousAssistantForNeighborhood = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+  const justAcceptedServedNeighborhood =
+    /obrigado pela informa[cç][aã]o[!,. ]+.*gostaria de ver nosso card[aá]pio\?/i.test(previousAssistantForNeighborhood);
+
+  if (justAcceptedServedNeighborhood && (isExplicitOrderConfirmation(text) || isExplicitMenuRequest(text))) {
+    // Primeiro confia no bairro já persistido no rascunho. Se, por alguma razão,
+    // a gravação do turno anterior não ficou disponível ainda, recupera do histórico
+    // a última mensagem do cliente que realmente corresponda à lista ATIVA.
+    let servedNeighborhood = draft.address_neighborhood
+      ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
+      : null;
+
+    if (!servedNeighborhood) {
+      const previousUserMessages = history
+        .filter((m) => m.role === "user")
+        .map((m) => String(m.content ?? ""))
+        .reverse();
+      for (const userMessage of previousUserMessages) {
+        if (normalizeStreet(userMessage) === normalizeStreet(text)) continue;
+        const match = findConfiguredBairroMatch(userMessage, bairrosAtendidos);
+        if (match) {
+          servedNeighborhood = match;
+          break;
+        }
+      }
+    }
+
+    if (servedNeighborhood) {
+      draft.delivery_mode = "delivery";
+      draft.address_neighborhood = servedNeighborhood;
+      draft.out_of_delivery_area = false;
+      await supabaseAdmin
+        .from("order_drafts")
+        .update({
+          delivery_mode: "delivery",
+          address_neighborhood: servedNeighborhood,
+          out_of_delivery_area: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("conversation_id", conversation.id);
+
+      await replyAndLog(supabaseAdmin, conversation.id, phone, "Claro! Aqui está nosso cardápio:");
+      await sendMenuImagesOnce(supabaseAdmin, conversation.id, phone, true);
+      return Response.json({ ok: true, action: "served_neighborhood_menu_confirmed" });
+    }
+  }
+
   // ============ PORTÃO DETERMINÍSTICO DE BAIRRO ============
   // Para decisões de entrega, preço/promoção, cardápio e continuidade do pedido,
   // o bairro precisa ser validado. Bairro atendido segue pelo WhatsApp; bairro
