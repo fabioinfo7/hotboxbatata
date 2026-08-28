@@ -737,6 +737,21 @@ function summarizeDraft(d: Draft): string {
   return lines.length ? lines.join("\n") : "(nada coletado ainda)";
 }
 
+function buildContinuityFallback(draft: Draft): string {
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  if (!items.length) return "Entendi. Para continuar seu pedido, qual sabor você gostaria de pedir, por favor?";
+  if (!draft.delivery_mode) return "Perfeito. Para continuar, o pedido será para entrega ou retirada, por favor?";
+  if (draft.delivery_mode === "delivery" && (!draft.address_street || !draft.address_number)) {
+    return "Qual seria o endereço de entrega, por favor? Pode me informar a rua e o número.";
+  }
+  if (!draft.customer_name) return "Para continuar, qual é o nome de quem vai receber o pedido, por favor?";
+  if (!draft.payment_method) {
+    return "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador.";
+  }
+  if (draft.awaiting_final_confirmation) return "Está tudo certo? Posso fechar o pedido?";
+  return "Perfeito. Vou seguir com o fechamento do seu pedido. Se estiver tudo certo com as informações enviadas, pode me confirmar, por favor?";
+}
+
 async function buildFinalConfirmationSummary(
   supabaseAdmin: any,
   d: Draft,
@@ -1078,6 +1093,14 @@ ${conversationStageText}
 Um atendente de verdade nunca despeja um monte de informação não pedida em cima do cliente — ele escuta a pergunta e responde exatamente aquilo, de forma organizada, e deixa o cliente guiar o ritmo da conversa. A única exceção são as sugestões de venda descritas mais abaixo (bebida, complemento, combo), que têm suas próprias regras de timing e moderação — fora isso, é proibido adicionar informação extra que ninguém pediu.
 
 🔒 SEGURANÇA E CONFIANÇA: o cliente precisa sentir que está numa loja de verdade, com alguém confiável do outro lado. Confirme cada informação importante antes de seguir (ex: repita o pedido antes de fechar), nunca deixe uma pergunta sem resposta, e se algo der errado (erro técnico, produto indisponível), explique com calma o que fazer a seguir em vez de deixar o cliente sem rumo. Precisão em cima de tudo — é melhor confirmar de novo do que errar um dado do pedido.
+
+🚨 REGRA INVIOLÁVEL DE CONTINUIDADE DO ATENDIMENTO:
+- O atendimento NUNCA pode parar no meio enquanto existir uma conversa/pedido em andamento. Toda mensagem do cliente deve resultar em uma resposta útil ou em uma ação concreta do backend seguida da continuação do fluxo.
+- Se houver ambiguidade (produto, sabor, quantidade, endereço, pagamento ou qualquer outro dado), faça UMA pergunta objetiva de esclarecimento. Quando o cliente responder, use essa resposta para resolver a ambiguidade e CONTINUE imediatamente do ponto em que parou, sem reiniciar o atendimento e sem ficar em silêncio.
+- Exemplo de produto ambíguo: se o cliente disser "a de bacon" e houver mais de um produto com bacon, ofereça somente as opções reais candidatas. Quando ele escolher uma delas, registre o nome EXATO do produto escolhido e já siga para o próximo dado que falta no pedido.
+- Depois de executar update_order_draft, lookup_place_address, ferramenta de produto, alteração ou qualquer outra ferramenta, se ainda faltar algo para fechar o pedido, sua resposta seguinte DEVE pedir exatamente o próximo dado faltante. Nunca termine uma rodada apenas porque uma ferramenta foi executada.
+- Se o cliente corrigir uma informação que você entendeu errado, reconheça a correção de forma breve, atualize o dado e continue o fluxo no mesmo turno.
+- Só é permitido encerrar o atendimento quando: (1) o pedido foi efetivamente criado/finalizado, (2) o cliente cancelou/desistiu explicitamente, (3) houve handoff humano explícito, ou (4) o cliente encerrou a conversa. Fora disso, sempre conduza ao próximo passo.
 
 Você também é um ótimo vendedor, do nível dos melhores atendentes de delivery — sabe aumentar o ticket médio sem parecer vendedor, de um jeito tão natural que o cliente nem percebe que está sendo "vendido":
 - 🥤 OFERTA DE BEBIDA NO FECHAMENTO — MUITO IMPORTANTE: se o pedido não tiver nenhuma bebida entre os itens, ANTES de chamar finalize_order você é OBRIGADA a oferecer bebida de forma discreta e natural (ex: "pra fechar, quer levar alguma bebida também?"), já citando as opções de bebida realmente disponíveis no CARDÁPIO ATIVO AGORA (nome e preço, formatadas como no restante do prompt) — nunca pergunte "quer bebida?" sem dizer quais existem. Ofereça uma vez só: se o cliente disser que não quer (ou ignorar e seguir pra outra coisa), não insista, siga direto pra finalizar o pedido. Se o pedido já tem alguma bebida, não ofereça de novo. Essa oferta acontece exatamente no fechamento do pedido — é a única sugestão de venda deste prompt que funciona assim (as outras têm o timing descrito abaixo).
@@ -3395,8 +3418,16 @@ async function runConversationalTurn(opts: {
   // (tool_choice: "none") pra garantir uma resposta real com o que já foi
   // apurado até aqui.
   if (!finalText) {
+    const forcedMessages = [
+      ...messages,
+      {
+        role: "system",
+        content:
+          "REGRA DE CONTINUIDADE: gere AGORA uma resposta não vazia para a última mensagem do cliente. Continue exatamente do ponto em que o atendimento parou. Se ele acabou de esclarecer uma ambiguidade, aceite a escolha/correção e peça o próximo dado que falta. Não reinicie o atendimento, não fique em silêncio e não encerre enquanto o pedido estiver em andamento.",
+      },
+    ];
     const forced = await callChatCompletion(opts.supabaseAdmin, {
-      messages,
+      messages: forcedMessages,
       tools: TOOLS,
       tool_choice: "none",
     });
@@ -4442,15 +4473,15 @@ async function handleIncomingMessageUnlocked(
       systemMessage: true,
     });
   }
-  if (!finalText && !pixBlock) {
-    // Fallback só quando a IA realmente não gerou nada (ex: provedores fora do
-    // ar). Marcado como system pra NUNCA entrar no histórico que a IA lê — o
-    // fallback antigo entrava no histórico e alimentava o loop de repetição.
+  if (!finalText && !pixBlock && !pixKeyLabel && !pixKeyMessage) {
+    // PROTEÇÃO DE CONTINUIDADE: mesmo se a IA falhar depois de uma correção,
+    // ambiguidade ou sequência de ferramentas, o cliente não fica abandonado.
+    // O backend pergunta o próximo dado estrutural que falta no rascunho.
     await replyAndLog(
       supabaseAdmin,
       conversation.id,
       phone,
-      `Tive uma instabilidade no atendimento e não consegui concluir sua mensagem agora. Se puder, envie novamente em instantes; se persistir, um atendente continuará por aqui.`,
+      buildContinuityFallback(draft),
       { systemMessage: true },
     );
   }
