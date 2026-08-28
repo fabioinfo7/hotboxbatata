@@ -78,10 +78,10 @@ function statusLabelFor(o: Order): string {
 
 function OrdersDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
-  const [unreadPhones, setUnreadPhones] = useState<Set<string>>(new Set());
   const [alarmOn, setAlarmOn] = useState(true);
   const [soundReady, setSoundReady] = useState(false);
   const [lowStock, setLowStock] = useState<any[]>([]);
+  const [unreadByPhone, setUnreadByPhone] = useState<Record<string, boolean>>({});
   const [nowTick, setNowTick] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNowTick(Date.now()), 15_000);
@@ -105,6 +105,28 @@ function OrdersDashboard() {
       /* ignore */
     }
   }
+
+  useEffect(() => {
+    const normalizePhoneKey = (value: string | null | undefined) => String(value ?? "").replace(/\D/g, "");
+    const loadUnread = async () => {
+      const { data } = await supabase
+        .from("whatsapp_conversations")
+        .select("phone,has_unread,unread_count");
+      const next: Record<string, boolean> = {};
+      for (const row of data ?? []) {
+        const key = normalizePhoneKey((row as any).phone);
+        if (key) next[key] = Boolean((row as any).has_unread || Number((row as any).unread_count ?? 0) > 0);
+      }
+      setUnreadByPhone(next);
+    };
+    loadUnread();
+    const unreadChannel = supabase
+      .channel("orders-customer-unread")
+      .on("postgres_changes", { event: "*", schema: "public", table: "whatsapp_conversations" }, loadUnread)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "whatsapp_messages", filter: "direction=eq.in" }, loadUnread)
+      .subscribe();
+    return () => { supabase.removeChannel(unreadChannel); };
+  }, []);
 
   useEffect(() => {
     const loadStock = () =>
@@ -153,28 +175,6 @@ function OrdersDashboard() {
       .subscribe();
     return () => {
       supabase.removeChannel(ch);
-    };
-  }, []);
-
-  useEffect(() => {
-    const normalizePhone = (value: string | null | undefined) => String(value ?? "").replace(/\D/g, "");
-    const loadUnread = () =>
-      supabase
-        .from("whatsapp_conversations")
-        .select("phone,has_unread")
-        .eq("has_unread", true)
-        .then(({ data }) => {
-          setUnreadPhones(new Set((data ?? []).map((row: any) => normalizePhone(row.phone)).filter(Boolean)));
-        });
-
-    loadUnread();
-    const channel = supabase
-      .channel("orders-whatsapp-unread")
-      .on("postgres_changes", { event: "*", schema: "public", table: "whatsapp_conversations" }, () => loadUnread())
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -433,13 +433,6 @@ function OrdersDashboard() {
                             <Button size="sm">{nextAction.label}</Button>
                           </Link>
                         ))}
-                      {o.customer_phone && (
-                        <Link to="/loja/chat" search={{ phone: o.customer_phone, name: o.customer_name }}>
-                          <Button size="sm" variant="ghost" title="Conversar com cliente">
-                            <MessageCircle className="size-4" />
-                          </Button>
-                        </Link>
-                      )}
                       {!["delivered", "cancelled"].includes(o.status) && (
                         <Button
                           size="sm"
@@ -472,13 +465,13 @@ function OrdersDashboard() {
               o.status === "pending" &&
               nowTick - new Date(o.created_at).getTime() > 3 * 60_000;
             const platformStuck = ifoodStuck || nfoodStuck;
-            const hasUnreadCustomerMessage = unreadPhones.has(String(o.customer_phone ?? "").replace(/\D/g, ""));
             const s = STATUS_STYLE[o.status] ?? STATUS_STYLE.pending;
             const StatusIcon = s.icon;
+            const customerHasUnread = Boolean(unreadByPhone[String(o.customer_phone ?? "").replace(/\D/g, "")]);
             return (
               <Card
                 key={o.id}
-                className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${hasUnreadCustomerMessage ? "customer-message-pulse border-2 border-emerald-500" : platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
+                className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${customerHasUnread ? "customer-message-pulse border-2 border-emerald-500" : platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
               >
                 {ifoodStuck && (
                   <div className="flex items-center justify-center gap-1.5 bg-red-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
@@ -488,11 +481,6 @@ function OrdersDashboard() {
                 {nfoodStuck && (
                   <div className="flex items-center justify-center gap-1.5 bg-red-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
                     <AlertCircle className="size-3.5 animate-pulse" /> Pedido 99Food aguardando aceite há mais de 3 min!
-                  </div>
-                )}
-                {hasUnreadCustomerMessage && (
-                  <div className="flex items-center justify-center gap-1.5 bg-emerald-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
-                    <MessageCircle className="size-3.5" /> Nova mensagem do cliente
                   </div>
                 )}
                 {/* faixa de status no topo — uma linha só, ícone maior, centralizado */}
@@ -694,21 +682,20 @@ function OrdersDashboard() {
                       <XCircle className="size-3.5" /> Cancelar
                     </Button>
                   )}
-                  {o.customer_phone && (
-                    <Link
-                      to="/loja/chat"
-                      search={{ phone: o.customer_phone, name: o.customer_name }}
-                      className="col-span-2"
+                  <Link
+                    to="/loja/chat"
+                    search={{ phone: o.customer_phone, name: o.customer_name || undefined }}
+                    className="col-span-2"
+                  >
+                    <Button
+                      size="sm"
+                      variant={customerHasUnread ? "default" : "outline"}
+                      className="w-full rounded-full font-semibold"
                     >
-                      <Button
-                        size="sm"
-                        variant={hasUnreadCustomerMessage ? "default" : "outline"}
-                        className="w-full rounded-full font-semibold"
-                      >
-                        <MessageCircle className="size-3.5" /> Conversar com cliente
-                      </Button>
-                    </Link>
-                  )}
+                      <MessageCircle className="size-3.5" />
+                      {customerHasUnread ? "Nova mensagem — abrir conversa" : "Conversar com cliente"}
+                    </Button>
+                  </Link>
                 </div>
               </Card>
             );
