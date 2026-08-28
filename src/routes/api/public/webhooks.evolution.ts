@@ -755,7 +755,7 @@ function buildContinuityFallback(draft: Draft): string {
     return "Só um instante enquanto confirmo a taxa de entrega para esse endereço.";
   }
   if (!draft.payment_method) {
-    return "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador.";
+    return PAYMENT_QUESTION_TEXT;
   }
   if (draft.awaiting_final_confirmation) return "Fico aguardando sua confirmação para fechar o pedido.";
   return "Perfeito. Vou preparar o resumo do pedido para sua confirmação.";
@@ -874,6 +874,34 @@ function isSimpleConversationAffirmative(text: string): boolean {
   // O contexto (pergunta anterior) decide O QUE está sendo confirmado; esta função
   // apenas reconhece que a fala do cliente é afirmativa.
   return /^(?:sim|s|ss|isso|isso ai|isso mesmo|correto|certo|certinho|perfeito|ok|okay|blz|beleza|show|fechou|demorou|exato|exatamente|pode ser|pode|pode sim|confirmo|confirmado|ta certo|tudo certo|tranquilo|joia|positivo|combinado)$/.test(t);
+}
+
+function looksLikeWholeOrderCancellationIntent(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  // Cancelamento do pedido inteiro. Pedidos para remover somente um item continuam
+  // no fluxo específico de cancel_active_order_item.
+  const wholeOrder = /\b(?:cancelar|cancela|cancele|cancelamento|desistir|desisto|nao quero mais|nao vou querer mais|pode cancelar)\b/.test(t);
+  const mentionsOrder = /\b(?:pedido|tudo|inteiro|completo)\b/.test(t) || /^(?:quero cancelar|pode cancelar|cancela pra mim|cancela para mim|desisto)$/i.test(t);
+  const itemOnly = /\b(?:item|batata|costela|strogonoff|frango|brocolis|pizza|bacon|mussarela|bebida|refrigerante)\b/.test(t) && !/\bpedido\b/.test(t);
+  return wholeOrder && mentionsOrder && !itemOnly;
+}
+
+function isCancellationConfirmationPrompt(text: string): boolean {
+  const t = normalizeStreet(text);
+  return /(?:realmente|confirma|confirmar).{0,35}cancel(?:ar|amento).{0,25}pedido|cancelar o pedido.{0,25}(?:confirma|tem certeza)|deseja.{0,25}cancelar.{0,25}pedido/.test(t);
+}
+
+function isNaturalCancellationAffirmative(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  if (/\b(?:nao|nao cancela|deixa|manter|mantem|desisti|espera|aguarda|calma)\b/.test(t)) return false;
+  return /\b(?:sim|confirmo|confirmado|isso|isso mesmo|correto|certo|claro|pode|pode cancelar|cancela|cancele|quero cancelar|fechado|beleza|blz|ok|okay|combinado|prossegue|pode prosseguir|faz isso|pode fazer)\b/.test(t);
+}
+
+function isCancellationDecline(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
+  return /^(?:nao|nao cancela|deixa|deixa como esta|quero manter|mantem|pode manter|esquece|desisti de cancelar)$/.test(t);
 }
 
 function isIntermediateItemsConfirmationPrompt(text: string): boolean {
@@ -1427,7 +1455,7 @@ const TOOLS = [
     function: {
       name: "cancel_active_order",
       description:
-        "Cancela imediatamente o pedido JÁ CRIADO e ainda ativo quando o cliente pedir cancelamento do pedido inteiro. Não precisa aguardar aprovação da loja. Registre que o cancelamento foi solicitado pelo cliente via WhatsApp.",
+        "Cancela o pedido JÁ CRIADO e ainda ativo SOMENTE depois que o cliente confirmou explicitamente que deseja cancelar o pedido inteiro. Nunca use na primeira solicitação de cancelamento; primeiro pergunte se ele realmente deseja cancelar.",
       parameters: {
         type: "object",
         properties: {
@@ -1441,7 +1469,7 @@ const TOOLS = [
     function: {
       name: "request_order_cancellation",
       description:
-        "LEGADO: use somente se cancel_active_order não estiver disponível. O fluxo normal de cancelamento total deve usar cancel_active_order.",
+        "Registra uma solicitação de cancelamento sem cancelar o pedido. Use apenas quando necessário para compatibilidade; a confirmação com o cliente deve ocorrer antes do cancelamento definitivo.",
       parameters: {
         type: "object",
         properties: {
@@ -1503,7 +1531,7 @@ ${conversationStageText}
 - BAIRRO PRIMEIRO: para ENTREGA, antes de mostrar cardápio, preço, promoção ou iniciar pedido, o bairro precisa estar identificado. Se ainda não estiver, peça SOMENTE o bairro.
 - Se o bairro não estiver na lista oficial de bairros atendidos pelo WhatsApp, NÃO revele preços nem envie a imagem do cardápio do WhatsApp. Redirecione para iFood/99Food e informe que o cardápio e os valores corretos para aquela região estão na plataforma. O cardápio do WhatsApp só pode ser enviado depois que o bairro estiver validado como atendido pela entrega própria, ou quando o cliente optar claramente por RETIRADA.
 - RETIRADA é exceção: se o cliente disser claramente que vai retirar, não peça bairro nem endereço.
-- PAGAMENTO: a loja aceita SOMENTE Pix ou cartão. Cartão pode ser crédito ou débito, mas NÃO pergunte qual dos dois: registre apenas "cartão". DINHEIRO EM ESPÉCIE NÃO É ACEITO e nunca existe pergunta sobre troco. Quando chegar a etapa de pagamento e esse dado estiver faltando, pergunte exatamente: "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador." NÃO pergunte se o pagamento será agora ou na entrega. Se o cliente disser apenas "Pix", registre Pix e siga o fluxo; se disser espontaneamente "Pix agora", respeite essa informação.
+- PAGAMENTO: a loja aceita SOMENTE Pix ou cartão. Cartão pode ser crédito ou débito, mas NÃO pergunte qual dos dois: registre apenas "cartão". DINHEIRO EM ESPÉCIE NÃO É ACEITO e nunca existe pergunta sobre troco. Quando chegar a etapa de pagamento e esse dado estiver faltando, pergunte exatamente: "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito e débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador." NÃO pergunte se o pagamento será agora ou na entrega. Se o cliente disser apenas "Pix", registre Pix e siga o fluxo; se disser espontaneamente "Pix agora", respeite essa informação.
 - PRAZO DE ENTREGA: para pedidos de entrega própria, informe sempre prazo de ATÉ 40 MINUTOS, ressaltando que a maioria das entregas acontece antes e que o cliente receberá atualizações pelo WhatsApp. Nunca informe 45 minutos e nunca prometa horário exato.
 - LOCALIZAÇÃO DA LOJA: se perguntarem onde fica, informe "Rua Carlos Chagas, em Jardim Gramacho" e diga naturalmente que trabalhamos somente com delivery. Nunca informe o número 492 ao cliente. O número existe apenas para uso interno/cálculo de rota.
 - PREÇO: use exclusivamente o preço efetivo do CARDÁPIO ATIVO AGORA; quando houver promoção ativa no sistema, esse preço promocional é o valor válido.
@@ -1562,7 +1590,7 @@ Sua missão é coletar, ao longo da conversa (não precisa tudo de uma vez, vá 
 - 🚨 CHAME update_order_draft NA HORA ASSIM QUE TIVER RUA + NÚMERO E JÁ EXISTIR BAIRRO VALIDADO NA CONVERSA. Não espere o cliente repetir o bairro. O sistema deve combinar rua+número recém-informados com o bairro validado no início e calcular a taxa imediatamente. Se o cliente informar um novo bairro explicitamente, aí sim atualize o bairro e revalide antes de calcular.
 - Itens do pedido — use SOMENTE os nomes e preços exatos do cardápio abaixo, nunca invente produto nem preço
 - QUANTIDADE INTELIGENTE — NUNCA pergunte quantidade quando ela já estiver explícita na frase do cliente. Artigos e números contam como quantidade: "uma de costela", "uma costela", "1 costela" = 1 unidade; "duas de pizza", "2 de pizza" = 2 unidades; "quero uma" = 1 unidade. Absorva a quantidade junto com o produto e chame update_order_draft. Só pergunte quantidade se realmente nenhuma quantidade puder ser inferida do que o cliente disse.
-- Forma de pagamento: quando esse dado estiver faltando, pergunte exatamente: "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador." Não favoreça nenhuma opção. Se o cliente disser "cartão", registre CARTÃO e continue — NUNCA pergunte crédito ou débito. Se disser "Pix", registre PIX e continue — NUNCA pergunte se será agora ou na entrega. Se ele espontaneamente disser "Pix agora", respeite essa informação.
+- Forma de pagamento: quando esse dado estiver faltando, pergunte exatamente: "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito e débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador." Não favoreça nenhuma opção. Se o cliente disser "cartão", registre CARTÃO e continue — NUNCA pergunte crédito ou débito. Se disser "Pix", registre PIX e continue — NUNCA pergunte se será agora ou na entrega. Se ele espontaneamente disser "Pix agora", respeite essa informação.
 - Se o cliente pedir dinheiro em espécie, explique com educação que, por segurança do entregador, a loja não trabalha com dinheiro e peça para escolher Pix, crédito à vista ou débito. Nunca pergunte sobre troco.
 
 ⚠️ PEDIDOS MÚLTIPLOS PRO MESMO ENDEREÇO — MUITO IMPORTANTE:
@@ -1629,7 +1657,7 @@ Regras importantes:
 - Se o cliente pedir para ADICIONAR, TROCAR ou ALTERAR quantidade de item em um pedido já criado e ainda ativo, use update_active_order_items com a lista COMPLETA de como o pedido deve ficar. O backend atualiza os itens, recalcula subtotal/taxa/total e envia os novos valores automaticamente. Não peça nova confirmação final do pedido inteiro.
 - Se o cliente pedir para CANCELAR/REMOVER apenas um item, use cancel_active_order_item. O backend remove/reduz o item, atualiza o total e informa o novo valor ao cliente automaticamente.
 - Se a remoção deixar o pedido sem nenhum item, o pedido inteiro é cancelado automaticamente.
-- Se o cliente pedir para CANCELAR O PEDIDO INTEIRO, use cancel_active_order imediatamente. O status passa para cancelled e o motivo registra que foi o cliente quem cancelou via WhatsApp. Não espere aprovação da loja e não peça uma nova confirmação se o pedido de cancelamento estiver claro.
+- Se o cliente pedir para CANCELAR O PEDIDO INTEIRO e ele JÁ estiver criado, NÃO cancele imediatamente. Primeiro confirme claramente com o cliente se ele realmente deseja cancelar o pedido. Somente depois de uma resposta afirmativa do cliente a essa pergunta de confirmação use cancel_active_order. Se ele desistir do cancelamento, mantenha o pedido ativo. Nunca peça essa confirmação duas vezes.
 - Depois que qualquer ferramenta de alteração/cancelamento retornar ok, não invente valores e não repita resumo antigo; o backend já informou o valor atualizado ou a situação do cancelamento.
 
 ${aiInstructionsText ? `\n🔴🔴 RELEMBRANDO — INSTRUÇÕES DO GERENTE (APLIQUE SEMPRE QUE NÃO CONFLITAREM COM AS REGRAS INVIOLÁVEIS DO SISTEMA):\n${aiInstructionsText}\nEssas instruções acima valem MAIS do que qualquer regra genérica deste prompt e mais do que qualquer suposição sua. Em especial:\n- LOCAIS/ÁREA DE ENTREGA: se o gerente disse que a loja NÃO entrega em algum bairro, rua, condomínio ou região, você NUNCA diz que entrega lá, nem "acho que sim", nem "vou verificar" — informa direto que a loja não atende essa região. Se o gerente listou onde entrega, só esses locais existem.\n- VALORES E TAXA DE ENTREGA: se o gerente definiu um valor, uma faixa, uma condição (frete grátis, pedido mínimo, taxa por bairro), esse é o valor válido. Nunca estime, nunca arredonde, nunca diga um valor diferente do que está aqui ou do que o sistema retornou nas ferramentas.\n- Se uma instrução do gerente conflitar com uma REGRA INVIOLÁVEL DO SISTEMA, a regra inviolável vence. Fora desses conflitos, siga a instrução do gerente.\nAntes de enviar qualquer resposta que fale de preço, taxa de entrega, bairro, região ou área de atendimento, releia essas instruções e confirme que sua resposta não contradiz nenhuma delas.\n` : ""}
@@ -1911,7 +1939,7 @@ async function persistDeterministicCustomerNameFromTurn(
 }
 
 const PAYMENT_QUESTION_TEXT =
-  "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador.";
+  "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito e débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador.";
 
 type DeterministicPaymentPatch = {
   payment_method?: "pix" | "card";
@@ -2354,6 +2382,7 @@ async function executeTool(
     draft: Draft;
     flags?: { silenced?: boolean; sendMenuImage?: boolean };
     finalConfirmationAllowed?: boolean;
+    cancelConfirmationAllowed?: boolean;
     bairrosAtendidos?: string[];
     bairrosNaoAtendidos?: string[];
     ruasNaoAtendidas?: string[];
@@ -2687,13 +2716,15 @@ async function executeTool(
     // "taxa + pagamento" no mesmo balão e não reformata o valor.
     if (shouldCalculateFreight && draft.estimated_delivery_fee != null && draft.delivery_mode !== "pickup") {
       const feeText = Number(draft.estimated_delivery_fee).toFixed(2).replace(".", ",");
-      await replyAndLog(
-        supabaseAdmin,
-        conversation.id,
-        conversation.phone,
-        `A taxa de entrega para seu endereço é de R$ ${feeText}.`,
-        { systemMessage: true },
-      );
+      if (!(await hasRecentFreightAnnouncement(supabaseAdmin, conversation.id, Number(draft.estimated_delivery_fee)))) {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          conversation.phone,
+          `A taxa de entrega para seu endereço é de R$ ${feeText}.`,
+          { systemMessage: true },
+        );
+      }
     }
 
     // Devolve a taxa calculada junto do resultado: a próxima resposta da IA
@@ -3311,6 +3342,14 @@ async function executeTool(
     if (!activeOrder) return { result: { status: "no_active_order" } };
 
     if (name === "cancel_active_order") {
+      if (!ctx.cancelConfirmationAllowed) {
+        return {
+          result: {
+            status: "confirmation_required",
+            instruction: "Não cancele ainda. Primeiro confirme com o cliente se ele realmente deseja cancelar o pedido inteiro.",
+          },
+        };
+      }
       const reasonText = String(args.reason ?? "").trim();
       const cancelReason = reasonText
         ? `Cliente cancelou pelo WhatsApp: ${reasonText}`
@@ -3569,6 +3608,27 @@ async function executeTool(
  * Foi isso que gerou o caso de o cliente receber R$ 6,00 (chute da IA) e
  * depois R$ 7,50 (valor real aprovado).
  */
+async function hasRecentFreightAnnouncement(
+  supabaseAdmin: any,
+  conversationId: string,
+  fee: number,
+): Promise<boolean> {
+  const label = Number(fee).toFixed(2).replace(".", ",");
+  const since = new Date(Date.now() - 2 * 60_000).toISOString();
+  const { data } = await supabaseAdmin
+    .from("whatsapp_messages")
+    .select("body,created_at")
+    .eq("conversation_id", conversationId)
+    .eq("direction", "out")
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(12);
+  return (data ?? []).some((m: any) => {
+    const body = normalizeStreet(String(m?.body ?? ""));
+    return /taxa de entrega/.test(body) && body.includes(normalizeStreet(`R$ ${label}`));
+  });
+}
+
 export function enforceApprovedFreight(text: string, draft: Draft): string {
   if (!text) return text;
   const approved = draft.delivery_mode === "pickup" ? null : (draft.estimated_delivery_fee ?? null);
@@ -3774,6 +3834,62 @@ async function runConversationalTurn(opts: {
   const previousAssistantText = lastUserIndex > 0
     ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
     : "";
+  // ============ CANCELAMENTO DE PEDIDO JÁ CRIADO ============
+  // Cancelar é uma ação destrutiva. A primeira intenção do cliente apenas gera
+  // uma pergunta de confirmação. Só a resposta afirmativa imediatamente após
+  // essa pergunta autoriza a mudança do status para cancelled.
+  const cancellationConfirmationAllowed =
+    isCancellationConfirmationPrompt(previousAssistantText) &&
+    isNaturalCancellationAffirmative(lastUserText);
+
+  if (!opts.forceNoTools && isCancellationConfirmationPrompt(previousAssistantText)) {
+    if (cancellationConfirmationAllowed) {
+      const directCancel = await executeTool("cancel_active_order", { reason: "Cancelamento confirmado pelo cliente via WhatsApp" }, {
+        supabaseAdmin: opts.supabaseAdmin,
+        conversation: opts.conversation,
+        draft: opts.draft,
+        flags,
+        finalConfirmationAllowed: false,
+        cancelConfirmationAllowed: true,
+        bairrosAtendidos: opts.bairrosAtendidos,
+        bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
+        ruasNaoAtendidas: opts.ruasNaoAtendidas,
+        currentUserText: lastUserText,
+      });
+      if (directCancel.result?.status === "ok") {
+        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
+      }
+      return {
+        finalText: "Não consegui concluir o cancelamento automaticamente. Um atendente vai verificar o pedido para você.",
+        pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
+      };
+    }
+    if (isCancellationDecline(lastUserText) || isExplicitNegative(lastUserText)) {
+      return {
+        finalText: "Certo. Seu pedido continua ativo normalmente.",
+        pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
+      };
+    }
+  }
+
+  if (!opts.forceNoTools && looksLikeWholeOrderCancellationIntent(lastUserText)) {
+    const { data: activeOrder } = await opts.supabaseAdmin
+      .from("orders")
+      .select("id,order_number,status")
+      .eq("customer_phone", opts.conversation.phone)
+      .not("status", "in", "(delivered,cancelled,failed)")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (activeOrder) {
+      return {
+        finalText: `Só para confirmar: você realmente deseja cancelar o pedido *${orderNumberFmt(activeOrder.order_number)}*?`,
+        pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
+      };
+    }
+  }
+
   if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
     const directSummary = await executeTool("finalize_order", {}, {
       supabaseAdmin: opts.supabaseAdmin,
@@ -4002,6 +4118,7 @@ async function runConversationalTurn(opts: {
           draft: opts.draft,
           flags,
           finalConfirmationAllowed,
+          cancelConfirmationAllowed: cancellationConfirmationAllowed,
           bairrosAtendidos: opts.bairrosAtendidos,
           bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
           ruasNaoAtendidas: opts.ruasNaoAtendidas,
@@ -4036,6 +4153,7 @@ async function runConversationalTurn(opts: {
           draft: opts.draft,
           flags,
           finalConfirmationAllowed,
+          cancelConfirmationAllowed: cancellationConfirmationAllowed,
           bairrosAtendidos: opts.bairrosAtendidos,
           bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
           ruasNaoAtendidas: opts.ruasNaoAtendidas,
@@ -4891,13 +5009,15 @@ async function handleIncomingMessageUnlocked(
 
     if (immediateFreight.status === "resolved" && immediateFreight.fee != null) {
       const feeText = Number(immediateFreight.fee).toFixed(2).replace(".", ",");
-      await replyAndLog(
-        supabaseAdmin,
-        conversation.id,
-        phone,
-        `A taxa de entrega para seu endereço é de R$ ${feeText}.`,
-        { systemMessage: true },
-      );
+      if (!(await hasRecentFreightAnnouncement(supabaseAdmin, conversation.id, Number(immediateFreight.fee)))) {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          `A taxa de entrega para seu endereço é de R$ ${feeText}.`,
+          { systemMessage: true },
+        );
+      }
 
       // A taxa e a próxima pergunta são mensagens independentes. Isso mantém
       // a conversa legível no WhatsApp e evita blocos de texto embolados.
