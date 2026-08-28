@@ -292,7 +292,7 @@ async function logMessage(
       .maybeSingle();
     await supabaseAdmin
       .from("whatsapp_conversations")
-      .update({ unread_count: (data?.unread_count ?? 0) + 1 })
+      .update({ unread_count: (data?.unread_count ?? 0) + 1, has_unread: true })
       .eq("id", conversationId);
   }
 }
@@ -642,6 +642,7 @@ type Draft = {
   out_of_delivery_area?: boolean;
   failed_finalize_attempts?: number;
   awaiting_final_confirmation?: boolean;
+  stage?: string | null;
 };
 
 // Se o rascunho ficou parado por muito tempo (cliente sumiu, teste antigo,
@@ -689,6 +690,7 @@ async function loadOrCreateDraft(supabaseAdmin: any, conversationId: string): Pr
         estimated_distance_km: null,
         out_of_delivery_area: false,
         awaiting_final_confirmation: false,
+        stage: "collecting",
         updated_at: new Date().toISOString(),
       };
       await supabaseAdmin.from("order_drafts").update(cleared).eq("conversation_id", conversationId);
@@ -874,34 +876,6 @@ function isSimpleConversationAffirmative(text: string): boolean {
   // O contexto (pergunta anterior) decide O QUE está sendo confirmado; esta função
   // apenas reconhece que a fala do cliente é afirmativa.
   return /^(?:sim|s|ss|isso|isso ai|isso mesmo|correto|certo|certinho|perfeito|ok|okay|blz|beleza|show|fechou|demorou|exato|exatamente|pode ser|pode|pode sim|confirmo|confirmado|ta certo|tudo certo|tranquilo|joia|positivo|combinado)$/.test(t);
-}
-
-function looksLikeWholeOrderCancellationIntent(text: string): boolean {
-  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!t) return false;
-  // Cancelamento do pedido inteiro. Pedidos para remover somente um item continuam
-  // no fluxo específico de cancel_active_order_item.
-  const wholeOrder = /\b(?:cancelar|cancela|cancele|cancelamento|desistir|desisto|nao quero mais|nao vou querer mais|pode cancelar)\b/.test(t);
-  const mentionsOrder = /\b(?:pedido|tudo|inteiro|completo)\b/.test(t) || /^(?:quero cancelar|pode cancelar|cancela pra mim|cancela para mim|desisto)$/i.test(t);
-  const itemOnly = /\b(?:item|batata|costela|strogonoff|frango|brocolis|pizza|bacon|mussarela|bebida|refrigerante)\b/.test(t) && !/\bpedido\b/.test(t);
-  return wholeOrder && mentionsOrder && !itemOnly;
-}
-
-function isCancellationConfirmationPrompt(text: string): boolean {
-  const t = normalizeStreet(text);
-  return /(?:realmente|confirma|confirmar).{0,35}cancel(?:ar|amento).{0,25}pedido|cancelar o pedido.{0,25}(?:confirma|tem certeza)|deseja.{0,25}cancelar.{0,25}pedido/.test(t);
-}
-
-function isNaturalCancellationAffirmative(text: string): boolean {
-  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!t) return false;
-  if (/\b(?:nao|nao cancela|deixa|manter|mantem|desisti|espera|aguarda|calma)\b/.test(t)) return false;
-  return /\b(?:sim|confirmo|confirmado|isso|isso mesmo|correto|certo|claro|pode|pode cancelar|cancela|cancele|quero cancelar|fechado|beleza|blz|ok|okay|combinado|prossegue|pode prosseguir|faz isso|pode fazer)\b/.test(t);
-}
-
-function isCancellationDecline(text: string): boolean {
-  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
-  return /^(?:nao|nao cancela|deixa|deixa como esta|quero manter|mantem|pode manter|esquece|desisti de cancelar)$/.test(t);
 }
 
 function isIntermediateItemsConfirmationPrompt(text: string): boolean {
@@ -1412,7 +1386,7 @@ const TOOLS = [
     function: {
       name: "update_active_order_items",
       description:
-        "Atualiza um pedido JÁ CRIADO e ainda ativo quando o cliente pedir alteração de itens, quantidade, inclusão ou troca. Envie a lista COMPLETA de como o pedido deve ficar depois da alteração. O sistema recalcula subtotal e total e informa os novos valores ao cliente.",
+        "Prepara uma alteração em pedido JÁ CRIADO e ainda ativo. Envie a lista COMPLETA de como o pedido deverá ficar. O backend calcula os novos valores, mostra a alteração ao cliente e pede confirmação; só depois da confirmação o pedido real é atualizado.",
       parameters: {
         type: "object",
         properties: {
@@ -1439,7 +1413,7 @@ const TOOLS = [
     function: {
       name: "cancel_active_order_item",
       description:
-        "Remove ou reduz um item de um pedido JÁ CRIADO e ainda ativo quando o cliente pedir cancelamento de apenas um item. O sistema recalcula automaticamente os valores e informa o novo total.",
+        "Prepara a remoção/redução de um item de pedido JÁ CRIADO. O backend calcula o novo total e pede confirmação; a alteração real só acontece depois que o cliente confirmar.",
       parameters: {
         type: "object",
         properties: {
@@ -1455,7 +1429,7 @@ const TOOLS = [
     function: {
       name: "cancel_active_order",
       description:
-        "Cancela o pedido JÁ CRIADO e ainda ativo SOMENTE depois que o cliente confirmou explicitamente que deseja cancelar o pedido inteiro. Nunca use na primeira solicitação de cancelamento; primeiro pergunte se ele realmente deseja cancelar.",
+        "Inicia o cancelamento de um pedido JÁ CRIADO. O backend SEMPRE pede confirmação ao cliente primeiro; só depois de uma resposta afirmativa o status muda para cancelled.",
       parameters: {
         type: "object",
         properties: {
@@ -1469,7 +1443,7 @@ const TOOLS = [
     function: {
       name: "request_order_cancellation",
       description:
-        "Registra uma solicitação de cancelamento sem cancelar o pedido. Use apenas quando necessário para compatibilidade; a confirmação com o cliente deve ocorrer antes do cancelamento definitivo.",
+        "LEGADO: use somente se cancel_active_order não estiver disponível. O fluxo normal de cancelamento total deve usar cancel_active_order.",
       parameters: {
         type: "object",
         properties: {
@@ -1531,7 +1505,7 @@ ${conversationStageText}
 - BAIRRO PRIMEIRO: para ENTREGA, antes de mostrar cardápio, preço, promoção ou iniciar pedido, o bairro precisa estar identificado. Se ainda não estiver, peça SOMENTE o bairro.
 - Se o bairro não estiver na lista oficial de bairros atendidos pelo WhatsApp, NÃO revele preços nem envie a imagem do cardápio do WhatsApp. Redirecione para iFood/99Food e informe que o cardápio e os valores corretos para aquela região estão na plataforma. O cardápio do WhatsApp só pode ser enviado depois que o bairro estiver validado como atendido pela entrega própria, ou quando o cliente optar claramente por RETIRADA.
 - RETIRADA é exceção: se o cliente disser claramente que vai retirar, não peça bairro nem endereço.
-- PAGAMENTO: a loja aceita SOMENTE Pix ou cartão. Cartão pode ser crédito ou débito, mas NÃO pergunte qual dos dois: registre apenas "cartão". DINHEIRO EM ESPÉCIE NÃO É ACEITO e nunca existe pergunta sobre troco. Quando chegar a etapa de pagamento e esse dado estiver faltando, pergunte exatamente: "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito e débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador." NÃO pergunte se o pagamento será agora ou na entrega. Se o cliente disser apenas "Pix", registre Pix e siga o fluxo; se disser espontaneamente "Pix agora", respeite essa informação.
+- PAGAMENTO: a loja aceita SOMENTE Pix ou cartão. Cartão pode ser crédito ou débito, mas NÃO pergunte qual dos dois: registre apenas "cartão". DINHEIRO EM ESPÉCIE NÃO É ACEITO e nunca existe pergunta sobre troco. Quando chegar a etapa de pagamento e esse dado estiver faltando, envie a pergunta de pagamento em uma mensagem organizada: "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito, cartão de débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador." NÃO pergunte se o pagamento será agora ou na entrega. Se o cliente disser apenas "Pix", registre Pix e siga o fluxo; se disser espontaneamente "Pix agora", respeite essa informação.
 - PRAZO DE ENTREGA: para pedidos de entrega própria, informe sempre prazo de ATÉ 40 MINUTOS, ressaltando que a maioria das entregas acontece antes e que o cliente receberá atualizações pelo WhatsApp. Nunca informe 45 minutos e nunca prometa horário exato.
 - LOCALIZAÇÃO DA LOJA: se perguntarem onde fica, informe "Rua Carlos Chagas, em Jardim Gramacho" e diga naturalmente que trabalhamos somente com delivery. Nunca informe o número 492 ao cliente. O número existe apenas para uso interno/cálculo de rota.
 - PREÇO: use exclusivamente o preço efetivo do CARDÁPIO ATIVO AGORA; quando houver promoção ativa no sistema, esse preço promocional é o valor válido.
@@ -1590,7 +1564,7 @@ Sua missão é coletar, ao longo da conversa (não precisa tudo de uma vez, vá 
 - 🚨 CHAME update_order_draft NA HORA ASSIM QUE TIVER RUA + NÚMERO E JÁ EXISTIR BAIRRO VALIDADO NA CONVERSA. Não espere o cliente repetir o bairro. O sistema deve combinar rua+número recém-informados com o bairro validado no início e calcular a taxa imediatamente. Se o cliente informar um novo bairro explicitamente, aí sim atualize o bairro e revalide antes de calcular.
 - Itens do pedido — use SOMENTE os nomes e preços exatos do cardápio abaixo, nunca invente produto nem preço
 - QUANTIDADE INTELIGENTE — NUNCA pergunte quantidade quando ela já estiver explícita na frase do cliente. Artigos e números contam como quantidade: "uma de costela", "uma costela", "1 costela" = 1 unidade; "duas de pizza", "2 de pizza" = 2 unidades; "quero uma" = 1 unidade. Absorva a quantidade junto com o produto e chame update_order_draft. Só pergunte quantidade se realmente nenhuma quantidade puder ser inferida do que o cliente disse.
-- Forma de pagamento: quando esse dado estiver faltando, pergunte exatamente: "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito e débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador." Não favoreça nenhuma opção. Se o cliente disser "cartão", registre CARTÃO e continue — NUNCA pergunte crédito ou débito. Se disser "Pix", registre PIX e continue — NUNCA pergunte se será agora ou na entrega. Se ele espontaneamente disser "Pix agora", respeite essa informação.
+- Forma de pagamento: quando esse dado estiver faltando, envie a pergunta de pagamento em uma mensagem organizada: "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito, cartão de débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador." Não favoreça nenhuma opção. Se o cliente disser "cartão", registre CARTÃO e continue — NUNCA pergunte crédito ou débito. Se disser "Pix", registre PIX e continue — NUNCA pergunte se será agora ou na entrega. Se ele espontaneamente disser "Pix agora", respeite essa informação.
 - Se o cliente pedir dinheiro em espécie, explique com educação que, por segurança do entregador, a loja não trabalha com dinheiro e peça para escolher Pix, crédito à vista ou débito. Nunca pergunte sobre troco.
 
 ⚠️ PEDIDOS MÚLTIPLOS PRO MESMO ENDEREÇO — MUITO IMPORTANTE:
@@ -1657,7 +1631,7 @@ Regras importantes:
 - Se o cliente pedir para ADICIONAR, TROCAR ou ALTERAR quantidade de item em um pedido já criado e ainda ativo, use update_active_order_items com a lista COMPLETA de como o pedido deve ficar. O backend atualiza os itens, recalcula subtotal/taxa/total e envia os novos valores automaticamente. Não peça nova confirmação final do pedido inteiro.
 - Se o cliente pedir para CANCELAR/REMOVER apenas um item, use cancel_active_order_item. O backend remove/reduz o item, atualiza o total e informa o novo valor ao cliente automaticamente.
 - Se a remoção deixar o pedido sem nenhum item, o pedido inteiro é cancelado automaticamente.
-- Se o cliente pedir para CANCELAR O PEDIDO INTEIRO e ele JÁ estiver criado, NÃO cancele imediatamente. Primeiro confirme claramente com o cliente se ele realmente deseja cancelar o pedido. Somente depois de uma resposta afirmativa do cliente a essa pergunta de confirmação use cancel_active_order. Se ele desistir do cancelamento, mantenha o pedido ativo. Nunca peça essa confirmação duas vezes.
+- Se o cliente pedir para CANCELAR O PEDIDO INTEIRO, use cancel_active_order imediatamente. O status passa para cancelled e o motivo registra que foi o cliente quem cancelou via WhatsApp. Não espere aprovação da loja e não peça uma nova confirmação se o pedido de cancelamento estiver claro.
 - Depois que qualquer ferramenta de alteração/cancelamento retornar ok, não invente valores e não repita resumo antigo; o backend já informou o valor atualizado ou a situação do cancelamento.
 
 ${aiInstructionsText ? `\n🔴🔴 RELEMBRANDO — INSTRUÇÕES DO GERENTE (APLIQUE SEMPRE QUE NÃO CONFLITAREM COM AS REGRAS INVIOLÁVEIS DO SISTEMA):\n${aiInstructionsText}\nEssas instruções acima valem MAIS do que qualquer regra genérica deste prompt e mais do que qualquer suposição sua. Em especial:\n- LOCAIS/ÁREA DE ENTREGA: se o gerente disse que a loja NÃO entrega em algum bairro, rua, condomínio ou região, você NUNCA diz que entrega lá, nem "acho que sim", nem "vou verificar" — informa direto que a loja não atende essa região. Se o gerente listou onde entrega, só esses locais existem.\n- VALORES E TAXA DE ENTREGA: se o gerente definiu um valor, uma faixa, uma condição (frete grátis, pedido mínimo, taxa por bairro), esse é o valor válido. Nunca estime, nunca arredonde, nunca diga um valor diferente do que está aqui ou do que o sistema retornou nas ferramentas.\n- Se uma instrução do gerente conflitar com uma REGRA INVIOLÁVEL DO SISTEMA, a regra inviolável vence. Fora desses conflitos, siga a instrução do gerente.\nAntes de enviar qualquer resposta que fale de preço, taxa de entrega, bairro, região ou área de atendimento, releia essas instruções e confirme que sua resposta não contradiz nenhuma delas.\n` : ""}
@@ -1939,13 +1913,66 @@ async function persistDeterministicCustomerNameFromTurn(
 }
 
 const PAYMENT_QUESTION_TEXT =
-  "*Qual será a forma de pagamento?*\nAceitamos cartão de crédito e débito ou Pix.\n\n*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador.";
+  "*Qual será a forma de pagamento?*\n" +
+  "Aceitamos cartão de crédito, cartão de débito ou Pix.\n\n" +
+  "*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador.";
+
+async function wasDeliveryFeeAlreadyAnnounced(
+  supabaseAdmin: any,
+  conversationId: string,
+  fee: number,
+): Promise<boolean> {
+  const feeLabel = Number(fee).toFixed(2).replace(".", ",");
+  const { data } = await supabaseAdmin
+    .from("whatsapp_messages")
+    .select("body,created_at")
+    .eq("conversation_id", conversationId)
+    .eq("direction", "out")
+    .not("body", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(10);
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  return (data ?? []).some((m: any) => {
+    const ts = m?.created_at ? new Date(m.created_at).getTime() : 0;
+    const body = normalizeStreet(String(m?.body ?? ""));
+    return ts >= cutoff &&
+      body.includes("taxa de entrega para seu endereco") &&
+      String(m?.body ?? "").includes(`R$ ${feeLabel}`);
+  });
+}
+
+function isExplicitOrderRejection(text: string): boolean {
+  const t = normalizeStreet(text);
+  return /^(?:nao|não|deixa|deixa assim|mantem|mantém|nao quero|não quero|cancela a alteracao|cancela a alteração|esquece|melhor nao|melhor não)$/.test(t) ||
+    /\b(?:nao confirma|não confirma|nao cancela|não cancela|nao altera|não altera|mantem como esta|mantém como está)\b/.test(t);
+}
+
+function isExplicitPendingActionConfirmation(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!t || isExplicitOrderRejection(text)) return false;
+  return [
+    /\bsim\b/,
+    /\b(?:isso|isso ai|isso mesmo|exato|exatamente)\b/,
+    /\bconfirm(?:o|a|ado|ar)\b/,
+    /\bpode\b.*\b(?:cancelar|cancela|remover|retirar|tirar|alterar|atualizar|mudar|fazer|seguir)\b/,
+    /^(?:pode|ok|okay|certo|correto|perfeito|beleza|blz|show|fechou|demorou|combinado|joia|positivo|tranquilo|bora|vamos|valeu)$/,
+    /^(?:cancela|cancelar|remove|remover|retira|retirar|tira|tirar|altera|alterar|atualiza|atualizar|faz isso|pode fazer)$/,
+  ].some((re) => re.test(t));
+}
 
 type DeterministicPaymentPatch = {
   payment_method?: "pix" | "card";
   card_type?: "credit" | "debit" | null;
   payment_timing?: "now" | "delivery";
 };
+
+function enforcePaymentQuestionPresentation(text: string, draft: Draft): string {
+  if (!text || draft.payment_method) return text;
+  const normalized = normalizeStreet(text);
+  const isPaymentQuestion = /(?:qual|informe|informar|diga|dizer).{0,40}(?:forma|metodo).{0,20}pagamento|qual sera a forma de pagamento/.test(normalized);
+  if (!isPaymentQuestion) return text;
+  return PAYMENT_QUESTION_TEXT;
+}
 
 function inferPaymentFromCustomerTurn(
   text: string,
@@ -2382,7 +2409,6 @@ async function executeTool(
     draft: Draft;
     flags?: { silenced?: boolean; sendMenuImage?: boolean };
     finalConfirmationAllowed?: boolean;
-    cancelConfirmationAllowed?: boolean;
     bairrosAtendidos?: string[];
     bairrosNaoAtendidos?: string[];
     ruasNaoAtendidas?: string[];
@@ -2716,7 +2742,10 @@ async function executeTool(
     // "taxa + pagamento" no mesmo balão e não reformata o valor.
     if (shouldCalculateFreight && draft.estimated_delivery_fee != null && draft.delivery_mode !== "pickup") {
       const feeText = Number(draft.estimated_delivery_fee).toFixed(2).replace(".", ",");
-      if (!(await hasRecentFreightAnnouncement(supabaseAdmin, conversation.id, Number(draft.estimated_delivery_fee)))) {
+      const feeAlreadySent = await wasDeliveryFeeAlreadyAnnounced(
+        supabaseAdmin, conversation.id, Number(draft.estimated_delivery_fee),
+      );
+      if (!feeAlreadySent) {
         await replyAndLog(
           supabaseAdmin,
           conversation.id,
@@ -3252,6 +3281,7 @@ async function executeTool(
         notes: null,
         failed_finalize_attempts: 0,
         awaiting_final_confirmation: false,
+        stage: "collecting",
         updated_at: new Date().toISOString(),
       })
       .eq("conversation_id", conversation.id);
@@ -3264,6 +3294,7 @@ async function executeTool(
     draft.estimated_distance_km = null;
     draft.failed_finalize_attempts = 0;
     draft.awaiting_final_confirmation = false;
+    draft.stage = "collecting";
     draft.items = [];
     draft.payment_method = null;
     draft.card_type = null;
@@ -3330,6 +3361,7 @@ async function executeTool(
 
 
   if (name === "update_active_order_items" || name === "cancel_active_order_item" || name === "cancel_active_order") {
+    const confirmedActiveAction = args?.__confirmed === true;
     const { data: activeOrder } = await supabaseAdmin
       .from("orders")
       .select("id,order_number,status,subtotal,total,delivery_fee,coupon_discount,source")
@@ -3342,15 +3374,31 @@ async function executeTool(
     if (!activeOrder) return { result: { status: "no_active_order" } };
 
     if (name === "cancel_active_order") {
-      if (!ctx.cancelConfirmationAllowed) {
-        return {
-          result: {
-            status: "confirmation_required",
-            instruction: "Não cancele ainda. Primeiro confirme com o cliente se ele realmente deseja cancelar o pedido inteiro.",
-          },
-        };
-      }
       const reasonText = String(args.reason ?? "").trim();
+      if (!confirmedActiveAction) {
+        const { error: stageError } = await supabaseAdmin
+          .from("order_drafts")
+          .update({
+            stage: "confirm_cancel_active_order",
+            notes: reasonText || null,
+            items: [],
+            awaiting_final_confirmation: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("conversation_id", conversation.id);
+        if (stageError) return { result: { status: "error", detail: stageError.message } };
+        draft.stage = "confirm_cancel_active_order";
+        draft.notes = reasonText || null;
+        draft.items = [];
+        await replyAndLog(
+          supabaseAdmin, conversation.id, conversation.phone,
+          `Só para confirmar: você deseja cancelar o pedido *${orderNumberFmt(activeOrder.order_number)}* por completo?\n\nSe confirmar, o pedido será cancelado no sistema.`,
+          { systemMessage: true },
+        );
+        ctx.flags.silenced = true;
+        return { result: { status: "pending_confirmation", action: "cancel_order", order_number: activeOrder.order_number } };
+      }
+
       const cancelReason = reasonText
         ? `Cliente cancelou pelo WhatsApp: ${reasonText}`
         : "Cliente cancelou o pedido pelo WhatsApp";
@@ -3365,7 +3413,10 @@ async function executeTool(
         })
         .eq("id", activeOrder.id);
       if (error) return { result: { status: "error", detail: error.message } };
-      // A mudança de status já aciona a mensagem automática de cancelamento do sistema.
+      await supabaseAdmin.from("order_drafts").update({
+        stage: "collecting", items: [], notes: null, awaiting_final_confirmation: false, updated_at: new Date().toISOString(),
+      }).eq("conversation_id", conversation.id);
+      draft.stage = "collecting"; draft.items = []; draft.notes = null;
       ctx.flags.silenced = true;
       return { result: { status: "ok", action: "order_cancelled", order_number: activeOrder.order_number } };
     }
@@ -3417,6 +3468,21 @@ async function executeTool(
     }
 
     if (!desired.length) {
+      if (!confirmedActiveAction) {
+        const { error: stageError } = await supabaseAdmin.from("order_drafts").update({
+          stage: "confirm_cancel_active_order", items: [], notes: "Remoção de todos os itens",
+          awaiting_final_confirmation: false, updated_at: new Date().toISOString(),
+        }).eq("conversation_id", conversation.id);
+        if (stageError) return { result: { status: "error", detail: stageError.message } };
+        draft.stage = "confirm_cancel_active_order"; draft.items = []; draft.notes = "Remoção de todos os itens";
+        await replyAndLog(
+          supabaseAdmin, conversation.id, conversation.phone,
+          `Essa alteração deixará o pedido *${orderNumberFmt(activeOrder.order_number)}* sem itens e, por isso, cancelará o pedido.\n\nVocê confirma o cancelamento?`,
+          { systemMessage: true },
+        );
+        ctx.flags.silenced = true;
+        return { result: { status: "pending_confirmation", action: "cancel_order_no_items", order_number: activeOrder.order_number } };
+      }
       const cancelReason = "Cliente cancelou todos os itens do pedido pelo WhatsApp";
       const { error } = await supabaseAdmin
         .from("orders")
@@ -3429,6 +3495,8 @@ async function executeTool(
         })
         .eq("id", activeOrder.id);
       if (error) return { result: { status: "error", detail: error.message } };
+      await supabaseAdmin.from("order_drafts").update({ stage: "collecting", items: [], notes: null, updated_at: new Date().toISOString() }).eq("conversation_id", conversation.id);
+      draft.stage = "collecting"; draft.items = []; draft.notes = null;
       ctx.flags.silenced = true;
       return { result: { status: "ok", action: "order_cancelled_no_items", order_number: activeOrder.order_number } };
     }
@@ -3463,6 +3531,25 @@ async function executeTool(
     const deliveryFee = Number(activeOrder.delivery_fee ?? 0);
     const total = Math.max(0, subtotal - couponDiscount) + deliveryFee;
 
+    if (!confirmedActiveAction) {
+      const pendingItems = repriced.map((it) => ({ product_name: it.product_name, quantity: it.quantity, notes: it.notes ?? null }));
+      const { error: stageError } = await supabaseAdmin.from("order_drafts").update({
+        stage: "confirm_active_order_update", items: pendingItems, notes: null, awaiting_final_confirmation: false, updated_at: new Date().toISOString(),
+      }).eq("conversation_id", conversation.id);
+      if (stageError) return { result: { status: "error", detail: stageError.message } };
+      draft.stage = "confirm_active_order_update"; draft.items = pendingItems; draft.notes = null;
+      const itemLines = repriced.map((it) => `- ${it.quantity}x ${it.product_name} — ${brl(it.quantity * it.unit_price)}`).join("\n");
+      const previewText =
+        `Só para confirmar a alteração do pedido *${orderNumberFmt(activeOrder.order_number)}*:\n\n` +
+        `*Itens atualizados:*\n${itemLines}\n\n` +
+        `*Taxa de entrega:* ${brl(deliveryFee)}\n` +
+        `*Novo total a pagar:* ${brl(total)}\n\n` +
+        `Está tudo certo? Posso atualizar o pedido?`;
+      await replyAndLog(supabaseAdmin, conversation.id, conversation.phone, previewText, { systemMessage: true });
+      ctx.flags.silenced = true;
+      return { result: { status: "pending_confirmation", action: "update_order", order_number: activeOrder.order_number, subtotal, delivery_fee: deliveryFee, total } };
+    }
+
     const { error: rpcError } = await supabaseAdmin.rpc("update_whatsapp_order_items_atomic", {
       p_order_id: activeOrder.id,
       p_items: repriced,
@@ -3487,6 +3574,11 @@ async function executeTool(
         return { result: { status: "error", detail: rpcError.message } };
       }
     }
+
+    await supabaseAdmin.from("order_drafts").update({
+      stage: "collecting", items: [], notes: null, awaiting_final_confirmation: false, updated_at: new Date().toISOString(),
+    }).eq("conversation_id", conversation.id);
+    draft.stage = "collecting"; draft.items = []; draft.notes = null;
 
     const itemLines = repriced.map((it) => `- ${it.quantity}x ${it.product_name} — ${brl(it.quantity * it.unit_price)}`).join("\n");
     const updateText =
@@ -3608,27 +3700,6 @@ async function executeTool(
  * Foi isso que gerou o caso de o cliente receber R$ 6,00 (chute da IA) e
  * depois R$ 7,50 (valor real aprovado).
  */
-async function hasRecentFreightAnnouncement(
-  supabaseAdmin: any,
-  conversationId: string,
-  fee: number,
-): Promise<boolean> {
-  const label = Number(fee).toFixed(2).replace(".", ",");
-  const since = new Date(Date.now() - 2 * 60_000).toISOString();
-  const { data } = await supabaseAdmin
-    .from("whatsapp_messages")
-    .select("body,created_at")
-    .eq("conversation_id", conversationId)
-    .eq("direction", "out")
-    .gte("created_at", since)
-    .order("created_at", { ascending: false })
-    .limit(12);
-  return (data ?? []).some((m: any) => {
-    const body = normalizeStreet(String(m?.body ?? ""));
-    return /taxa de entrega/.test(body) && body.includes(normalizeStreet(`R$ ${label}`));
-  });
-}
-
 export function enforceApprovedFreight(text: string, draft: Draft): string {
   if (!text) return text;
   const approved = draft.delivery_mode === "pickup" ? null : (draft.estimated_delivery_fee ?? null);
@@ -3828,68 +3899,49 @@ async function runConversationalTurn(opts: {
   })();
   const lastUserText = lastUserIndex >= 0 ? (opts.history[lastUserIndex]?.content ?? "") : "";
 
+  // ============ CONFIRMAÇÃO DE ALTERAÇÃO/CANCELAMENTO DE PEDIDO JÁ CRIADO ============
+  // Usa `order_drafts.stage` como estado persistente. Assim a intenção é pedida
+  // em uma rodada e consumida na mensagem seguinte sem depender de a IA lembrar.
+  if (!opts.forceNoTools && (opts.draft.stage === "confirm_cancel_active_order" || opts.draft.stage === "confirm_active_order_update")) {
+    if (isExplicitPendingActionConfirmation(lastUserText)) {
+      const pendingStage = opts.draft.stage;
+      const direct = pendingStage === "confirm_cancel_active_order"
+        ? await executeTool("cancel_active_order", { reason: opts.draft.notes ?? undefined, __confirmed: true }, {
+            supabaseAdmin: opts.supabaseAdmin, conversation: opts.conversation, draft: opts.draft, flags,
+            finalConfirmationAllowed: false, bairrosAtendidos: opts.bairrosAtendidos, bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
+            ruasNaoAtendidas: opts.ruasNaoAtendidas, currentUserText: lastUserText,
+          })
+        : await executeTool("update_active_order_items", { items: opts.draft.items ?? [], __confirmed: true }, {
+            supabaseAdmin: opts.supabaseAdmin, conversation: opts.conversation, draft: opts.draft, flags,
+            finalConfirmationAllowed: false, bairrosAtendidos: opts.bairrosAtendidos, bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
+            ruasNaoAtendidas: opts.ruasNaoAtendidas, currentUserText: lastUserText,
+          });
+      if (direct.result?.status !== "ok") {
+        await replyAndLog(
+          opts.supabaseAdmin, opts.conversation.id, opts.conversation.phone,
+          "Não consegui concluir essa alteração agora. Vou deixar o pedido como está e a equipe pode conferir para você.",
+          { systemMessage: true },
+        );
+      }
+      return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
+    }
+    if (isExplicitOrderRejection(lastUserText)) {
+      await opts.supabaseAdmin.from("order_drafts").update({
+        stage: "collecting", items: [], notes: null, awaiting_final_confirmation: false, updated_at: new Date().toISOString(),
+      }).eq("conversation_id", opts.conversation.id);
+      opts.draft.stage = "collecting"; opts.draft.items = []; opts.draft.notes = null;
+      await replyAndLog(opts.supabaseAdmin, opts.conversation.id, opts.conversation.phone,
+        "Tudo bem. Mantive o pedido como estava.", { systemMessage: true });
+      return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
+    }
+  }
+
   // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
   // disser que não quer bebida, o backend gera imediatamente o resumo oficial
   // com TOTAL e pede a única confirmação final.
   const previousAssistantText = lastUserIndex > 0
     ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
     : "";
-  // ============ CANCELAMENTO DE PEDIDO JÁ CRIADO ============
-  // Cancelar é uma ação destrutiva. A primeira intenção do cliente apenas gera
-  // uma pergunta de confirmação. Só a resposta afirmativa imediatamente após
-  // essa pergunta autoriza a mudança do status para cancelled.
-  const cancellationConfirmationAllowed =
-    isCancellationConfirmationPrompt(previousAssistantText) &&
-    isNaturalCancellationAffirmative(lastUserText);
-
-  if (!opts.forceNoTools && isCancellationConfirmationPrompt(previousAssistantText)) {
-    if (cancellationConfirmationAllowed) {
-      const directCancel = await executeTool("cancel_active_order", { reason: "Cancelamento confirmado pelo cliente via WhatsApp" }, {
-        supabaseAdmin: opts.supabaseAdmin,
-        conversation: opts.conversation,
-        draft: opts.draft,
-        flags,
-        finalConfirmationAllowed: false,
-        cancelConfirmationAllowed: true,
-        bairrosAtendidos: opts.bairrosAtendidos,
-        bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
-        ruasNaoAtendidas: opts.ruasNaoAtendidas,
-        currentUserText: lastUserText,
-      });
-      if (directCancel.result?.status === "ok") {
-        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
-      }
-      return {
-        finalText: "Não consegui concluir o cancelamento automaticamente. Um atendente vai verificar o pedido para você.",
-        pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
-      };
-    }
-    if (isCancellationDecline(lastUserText) || isExplicitNegative(lastUserText)) {
-      return {
-        finalText: "Certo. Seu pedido continua ativo normalmente.",
-        pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
-      };
-    }
-  }
-
-  if (!opts.forceNoTools && looksLikeWholeOrderCancellationIntent(lastUserText)) {
-    const { data: activeOrder } = await opts.supabaseAdmin
-      .from("orders")
-      .select("id,order_number,status")
-      .eq("customer_phone", opts.conversation.phone)
-      .not("status", "in", "(delivered,cancelled,failed)")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (activeOrder) {
-      return {
-        finalText: `Só para confirmar: você realmente deseja cancelar o pedido *${orderNumberFmt(activeOrder.order_number)}*?`,
-        pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
-      };
-    }
-  }
-
   if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
     const directSummary = await executeTool("finalize_order", {}, {
       supabaseAdmin: opts.supabaseAdmin,
@@ -4118,7 +4170,6 @@ async function runConversationalTurn(opts: {
           draft: opts.draft,
           flags,
           finalConfirmationAllowed,
-          cancelConfirmationAllowed: cancellationConfirmationAllowed,
           bairrosAtendidos: opts.bairrosAtendidos,
           bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
           ruasNaoAtendidas: opts.ruasNaoAtendidas,
@@ -4153,7 +4204,6 @@ async function runConversationalTurn(opts: {
           draft: opts.draft,
           flags,
           finalConfirmationAllowed,
-          cancelConfirmationAllowed: cancellationConfirmationAllowed,
           bairrosAtendidos: opts.bairrosAtendidos,
           bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
           ruasNaoAtendidas: opts.ruasNaoAtendidas,
@@ -4301,9 +4351,10 @@ async function runConversationalTurn(opts: {
   const freightSafeText = enforceApprovedFreight(finalText, opts.draft);
   const salesFlowSafeText = enforceNaturalSalesProgression(freightSafeText, lastUserText, opts.draft);
   const noRepeatSafeText = enforceNoRepeatedKnownQuestion(salesFlowSafeText, opts.draft);
+  const paymentSafeText = enforcePaymentQuestionPresentation(noRepeatSafeText, opts.draft);
 
   return {
-    finalText: noRepeatSafeText,
+    finalText: paymentSafeText,
     pixBlock,
     pixKeyLabel,
     pixKeyMessage,
@@ -5009,7 +5060,10 @@ async function handleIncomingMessageUnlocked(
 
     if (immediateFreight.status === "resolved" && immediateFreight.fee != null) {
       const feeText = Number(immediateFreight.fee).toFixed(2).replace(".", ",");
-      if (!(await hasRecentFreightAnnouncement(supabaseAdmin, conversation.id, Number(immediateFreight.fee)))) {
+      const feeAlreadySent = await wasDeliveryFeeAlreadyAnnounced(
+        supabaseAdmin, conversation.id, Number(immediateFreight.fee),
+      );
+      if (!feeAlreadySent) {
         await replyAndLog(
           supabaseAdmin,
           conversation.id,
