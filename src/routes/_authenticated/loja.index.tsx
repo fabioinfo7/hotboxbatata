@@ -78,6 +78,7 @@ function statusLabelFor(o: Order): string {
 
 function OrdersDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
+  const [unreadPhones, setUnreadPhones] = useState<Set<string>>(new Set());
   const [alarmOn, setAlarmOn] = useState(true);
   const [soundReady, setSoundReady] = useState(false);
   const [lowStock, setLowStock] = useState<any[]>([]);
@@ -152,6 +153,28 @@ function OrdersDashboard() {
       .subscribe();
     return () => {
       supabase.removeChannel(ch);
+    };
+  }, []);
+
+  useEffect(() => {
+    const normalizePhone = (value: string | null | undefined) => String(value ?? "").replace(/\D/g, "");
+    const loadUnread = () =>
+      supabase
+        .from("whatsapp_conversations")
+        .select("phone,has_unread")
+        .eq("has_unread", true)
+        .then(({ data }) => {
+          setUnreadPhones(new Set((data ?? []).map((row: any) => normalizePhone(row.phone)).filter(Boolean)));
+        });
+
+    loadUnread();
+    const channel = supabase
+      .channel("orders-whatsapp-unread")
+      .on("postgres_changes", { event: "*", schema: "public", table: "whatsapp_conversations" }, () => loadUnread())
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -410,6 +433,13 @@ function OrdersDashboard() {
                             <Button size="sm">{nextAction.label}</Button>
                           </Link>
                         ))}
+                      {o.customer_phone && (
+                        <Link to="/loja/chat" search={{ phone: o.customer_phone, name: o.customer_name }}>
+                          <Button size="sm" variant="ghost" title="Conversar com cliente">
+                            <MessageCircle className="size-4" />
+                          </Button>
+                        </Link>
+                      )}
                       {!["delivered", "cancelled"].includes(o.status) && (
                         <Button
                           size="sm"
@@ -442,12 +472,13 @@ function OrdersDashboard() {
               o.status === "pending" &&
               nowTick - new Date(o.created_at).getTime() > 3 * 60_000;
             const platformStuck = ifoodStuck || nfoodStuck;
+            const hasUnreadCustomerMessage = unreadPhones.has(String(o.customer_phone ?? "").replace(/\D/g, ""));
             const s = STATUS_STYLE[o.status] ?? STATUS_STYLE.pending;
             const StatusIcon = s.icon;
             return (
               <Card
                 key={o.id}
-                className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
+                className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${hasUnreadCustomerMessage ? "customer-message-pulse border-2 border-emerald-500" : platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
               >
                 {ifoodStuck && (
                   <div className="flex items-center justify-center gap-1.5 bg-red-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
@@ -457,6 +488,11 @@ function OrdersDashboard() {
                 {nfoodStuck && (
                   <div className="flex items-center justify-center gap-1.5 bg-red-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
                     <AlertCircle className="size-3.5 animate-pulse" /> Pedido 99Food aguardando aceite há mais de 3 min!
+                  </div>
+                )}
+                {hasUnreadCustomerMessage && (
+                  <div className="flex items-center justify-center gap-1.5 bg-emerald-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
+                    <MessageCircle className="size-3.5" /> Nova mensagem do cliente
                   </div>
                 )}
                 {/* faixa de status no topo — uma linha só, ícone maior, centralizado */}
@@ -657,6 +693,21 @@ function OrdersDashboard() {
                     >
                       <XCircle className="size-3.5" /> Cancelar
                     </Button>
+                  )}
+                  {o.customer_phone && (
+                    <Link
+                      to="/loja/chat"
+                      search={{ phone: o.customer_phone, name: o.customer_name }}
+                      className="col-span-2"
+                    >
+                      <Button
+                        size="sm"
+                        variant={hasUnreadCustomerMessage ? "default" : "outline"}
+                        className="w-full rounded-full font-semibold"
+                      >
+                        <MessageCircle className="size-3.5" /> Conversar com cliente
+                      </Button>
+                    </Link>
                   )}
                 </div>
               </Card>
