@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { pushIfoodStatusFn } from "@/lib/ifood-push.functions";
 import { pushNfoodStatusFn } from "@/lib/nfood-push.functions";
 import { sendOrderArrivalNoticeFn } from "@/lib/order-notifications.functions";
+import { confirmSitePaymentFn } from "@/lib/site-payment.functions";
 import {
   brl,
   formatDateTime,
@@ -324,17 +325,28 @@ function OrderDetail() {
   }
 
   async function confirmPayment() {
-    const { error } = await supabase
-      .from("orders")
-      .update({
-        payment_status: "paid",
-        payment_timing: order.payment_timing === "later" ? null : order.payment_timing,
-        payment_confirmed_at: new Date().toISOString(),
-        payment_confirmed_by: "admin",
-      })
-      .eq("id", id);
-    if (error) toast.error(error.message);
-    else toast.success("Pagamento confirmado");
+    try {
+      if (order.source === "site") {
+        const result = await confirmSitePaymentFn({ data: { orderId: id } });
+        if (!result.ok) return toast.error(result.error || "Falha ao confirmar pagamento");
+        setOrder((prev: any) => prev ? { ...prev, payment_status: "paid", payment_timing: "now", status: prev.status === "pending_review" ? "pending" : prev.status } : prev);
+        toast.success("Pagamento confirmado. Pedido liberado para o fluxo operacional e cliente avisado no WhatsApp.");
+        return;
+      }
+      const { error } = await supabase
+        .from("orders")
+        .update({
+          payment_status: "paid",
+          payment_timing: order.payment_timing === "later" ? null : order.payment_timing,
+          payment_confirmed_at: new Date().toISOString(),
+          payment_confirmed_by: "admin",
+        })
+        .eq("id", id);
+      if (error) toast.error(error.message);
+      else toast.success("Pagamento confirmado");
+    } catch (err: any) {
+      toast.error(err?.message || "Falha ao confirmar pagamento");
+    }
   }
 
   async function cancelOrder() {
