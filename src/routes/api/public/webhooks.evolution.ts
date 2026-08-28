@@ -818,6 +818,122 @@ function parseExplicitQuantityFromText(text: string): number | null {
   return null;
 }
 
+
+function isExplicitDraftItemChangeIntent(text: string | null | undefined): boolean {
+  const t = normalizeStreet(String(text ?? ""));
+  if (!t) return false;
+  return /\b(?:tira|tirar|retira|retirar|remove|remover|exclui|excluir|cancela|cancelar|troca|trocar|substitui|substituir|muda|mudar|altera|alterar|corrige|corrigir|diminui|diminuir|reduz|reduzir|aumenta|aumentar|acrescenta|acrescentar|adiciona|adicionar|mais uma|mais um|recomecar|esquecer.*pedido)\b/.test(t);
+}
+
+function normalizeDraftItems(items: any): DraftItem[] {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((it: any) => ({
+      product_name: String(it?.product_name ?? "").trim(),
+      quantity: Math.max(1, Math.round(Number(it?.quantity) || 1)),
+      notes: it?.notes == null ? null : String(it.notes),
+    }))
+    .filter((it: DraftItem) => Boolean(it.product_name));
+}
+
+/**
+ * update_order_draft é acionado por um LLM. Em turnos que não alteram produtos
+ * (endereço, nome, pagamento etc.) alguns provedores podem reenviar `items: []`
+ * ou apenas parte da lista. A versão antiga aceitava isso literalmente e apagava
+ * o pedido já coletado. Aqui o draft nunca pode REGREDIR sem intenção explícita
+ * do cliente de alterar/remover itens.
+ */
+function reconcileDraftItems(existingRaw: DraftItem[] | null | undefined, incomingRaw: any, userText: string): DraftItem[] {
+  const existing = normalizeDraftItems(existingRaw ?? []);
+  const incoming = normalizeDraftItems(incomingRaw);
+  const destructiveChangeAllowed = isExplicitDraftItemChangeIntent(userText);
+
+  if (!destructiveChangeAllowed) {
+    if (!incoming.length && existing.length) return existing;
+    if (!existing.length) return incoming;
+
+    const merged = [...existing];
+    for (const item of incoming) {
+      const key = normalizeStreet(item.product_name);
+      const idx = merged.findIndex((old) => normalizeStreet(old.product_name) === key);
+      if (idx >= 0) merged[idx] = { ...merged[idx], ...item };
+      else merged.push(item);
+    }
+    return merged;
+  }
+
+  // Alteração/remoção foi realmente pedida pelo cliente: nessa situação a lista
+  // COMPLETA retornada pela ferramenta pode substituir a anterior, inclusive [].
+  return incoming;
+}
+
+function isSimpleConversationAffirmative(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  return /^(?:sim|isso|isso mesmo|correto|certo|certinho|perfeito|ok|exato|exatamente|pode ser|confirmo)$/.test(t);
+}
+
+function isIntermediateItemsConfirmationPrompt(text: string): boolean {
+  const t = normalizeStreet(text);
+  if (!t) return false;
+  // Resumo final é outra etapa e possui total/taxa ou pedido explícito de fechamento.
+  if (/resumo do (?:seu )?pedido|total a pagar|taxa de entrega|posso fechar o pedido|pode fechar o pedido/.test(t)) return false;
+  const asksConfirmation = /\b(?:correto|certo|confere|esta correto|esta certo)\b/.test(t);
+  const mentionsItems = /\b(?:unidade|unidades|item|itens|gostaria de|voce gostaria de|pedir|pedido)\b/.test(t);
+  return asksConfirmation && mentionsItems;
+}
+
+function parseAddressFromCustomerTurn(
+  userText: string,
+  previousAssistantText: string,
+): { street?: string; number?: string } | null {
+  const raw = String(userText ?? "").trim();
+  if (!raw) return null;
+  const prev = normalizeStreet(previousAssistantText);
+  const addressContext = /\b(?:endereco|rua|avenida|av\.?|numero|residencia)\b/.test(prev);
+  const explicitStreet = /^(?:rua|r\.?|avenida|av\.?|travessa|tv\.?|estrada|rodovia|alameda|praca|praça)\b/i.test(raw);
+  if (!addressContext && !explicitStreet) return null;
+
+  // Resposta isolada à pergunta de número: "324", "Número 324", "nº 324".
+  // Faz o reconhecimento na versão normalizada para cobrir "Número" com acento.
+  const normalizedRaw = normalizeStreet(raw).replace(/[º°]/g, "o");
+  const onlyNumber = normalizedRaw.match(/^(?:(?:n(?:o|umero)?\.?|numero)\s*[:#-]?\s*)?(\d{1,6}[a-z]?)$/i);
+  if (onlyNumber && /\bnumero\b/.test(prev)) return { number: onlyNumber[1] };
+
+  // Rua + número no mesmo turno: "Av Brasil 324", "Rua X, nº 10".
+  const full = raw.match(/^(.+?)(?:\s*,?\s+(?:n(?:[º°o]|umero)?\.?\s*)?)(\d{1,6}[a-zA-Z]?)\s*$/i);
+  if (!full) return null;
+  const street = full[1].replace(/[,-]+\s*$/, "").trim();
+  if (!street || /^\d+$/.test(street)) return null;
+  return { street, number: full[2] };
+}
+
+async function persistDeterministicAddressFromTurn(
+  supabaseAdmin: any,
+  conversationId: string,
+  userText: string,
+  history: Array<{ role: string; content: string }>,
+  draft: Draft,
+): Promise<void> {
+  if (draft.delivery_mode === "pickup") return;
+  const previousAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+  const parsed = parseAddressFromCustomerTurn(userText, previousAssistant);
+  if (!parsed) return;
+
+  const patch: any = { updated_at: new Date().toISOString() };
+  if (parsed.street) {
+    draft.address_street = parsed.street;
+    patch.address_street = parsed.street;
+  }
+  if (parsed.number) {
+    draft.address_number = parsed.number;
+    patch.address_number = parsed.number;
+  }
+  // O bairro previamente validado permanece intocado.
+  const { error } = await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversationId);
+  if (error) throw new Error(`Falha ao persistir endereço determinístico: ${error.message}`);
+}
+
 function significantProductTokens(name: string): string[] {
   const stop = new Set(["batata", "recheada", "de", "da", "do", "com", "e", "sabor", "cremoso", "cremosa", "crocante"]);
   return normalizeStreet(name).split(/\s+/).filter((x) => x.length >= 3 && !stop.has(x));
@@ -867,7 +983,8 @@ async function persistObviousProductMemoryFromTurn(
 
   draft.items = existing;
   draft.awaiting_final_confirmation = false;
-  await supabaseAdmin.from("order_drafts").update({ items: existing, awaiting_final_confirmation: false, updated_at: new Date().toISOString() }).eq("conversation_id", conversationId);
+  const { error } = await supabaseAdmin.from("order_drafts").update({ items: existing, awaiting_final_confirmation: false, updated_at: new Date().toISOString() }).eq("conversation_id", conversationId);
+  if (error) throw new Error(`Falha ao persistir memória de itens: ${error.message}`);
 }
 
 function assistantPromisesActionButDoesNothing(text: string): boolean {
@@ -1056,7 +1173,7 @@ const TOOLS = [
     function: {
       name: "update_order_draft",
       description:
-        "Atualiza os dados já coletados do pedido em andamento nesta conversa. Chame sempre que o cliente informar ou confirmar algo novo (nome, endereço, itens, pagamento).",
+        "Atualiza os dados já coletados do pedido em andamento nesta conversa. Chame sempre que o cliente informar ou confirmar algo novo (nome, endereço, itens, pagamento). IMPORTANTE: em turnos de endereço/nome/pagamento, OMITA o campo items. Só envie items quando o cliente realmente informar ou alterar produtos; quando enviar, use a lista completa atual.",
       parameters: {
         type: "object",
         properties: {
@@ -2004,6 +2121,7 @@ async function executeTool(
     bairrosAtendidos?: string[];
     bairrosNaoAtendidos?: string[];
     ruasNaoAtendidas?: string[];
+    currentUserText?: string;
   },
 ): Promise<{
   result: any;
@@ -2091,8 +2209,13 @@ async function executeTool(
       draft.change_for = args.change_for;
     }
     if (args.items !== undefined) {
-      patch.items = args.items;
-      draft.items = args.items;
+      const reconciledItems = reconcileDraftItems(draft.items ?? [], args.items, ctx.currentUserText ?? "");
+      // Só grava se o conteúdo efetivo mudou. Em particular, `items: []` vindo
+      // acidentalmente num turno de endereço/nome/pagamento não apaga mais o pedido.
+      if (JSON.stringify(reconciledItems) !== JSON.stringify(normalizeDraftItems(draft.items ?? []))) {
+        patch.items = reconciledItems;
+        draft.items = reconciledItems;
+      }
     }
 
     // Bairro ou número isolado não podem virar rua. Sem rua + número + bairro
@@ -2147,7 +2270,8 @@ async function executeTool(
         draft.awaiting_final_confirmation = false;
       }
       patch.updated_at = new Date().toISOString();
-      await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversation.id);
+      const { error: draftUpdateError } = await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversation.id);
+      if (draftUpdateError) throw new Error(`Falha ao salvar endereço parcial do pedido: ${draftUpdateError.message}`);
       const missingAddress: string[] = [];
       if (!draft.address_street?.trim()) missingAddress.push("rua");
       if (!draft.address_number?.trim()) missingAddress.push("número");
@@ -2271,7 +2395,8 @@ async function executeTool(
       draft.awaiting_final_confirmation = false;
     }
     patch.updated_at = new Date().toISOString();
-    await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversation.id);
+    const { error: draftPatchError } = await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversation.id);
+    if (draftPatchError) throw new Error(`Falha ao persistir atualização do pedido: ${draftPatchError.message}`);
 
     // Se esta atualização aconteceu depois da oferta de bebida e agora todos
     // os dados estão completos, o BACKEND envia o resumo imediatamente. Isso
@@ -3409,6 +3534,7 @@ async function runConversationalTurn(opts: {
       bairrosAtendidos: opts.bairrosAtendidos,
       bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
       ruasNaoAtendidas: opts.ruasNaoAtendidas,
+      currentUserText: lastUserText,
     });
     if (flags.silenced || directSummary.result?.status === "final_confirmation_summary_sent") {
       return {
@@ -3422,13 +3548,35 @@ async function runConversationalTurn(opts: {
     }
   }
 
+  // Confirmação dos ITENS é uma etapa intermediária, não a confirmação final.
+  // A versão anterior deixava "Isso" voltar para a IA e ela podia repetir a mesma
+  // pergunta; além disso, "Correto" era confundido com confirmação final. Quando
+  // a fala anterior apenas confirmou a composição dos itens, consumimos a resposta
+  // aqui e seguimos deterministicamente para o próximo dado realmente faltante.
+  if (
+    !opts.forceNoTools &&
+    isSimpleConversationAffirmative(lastUserText) &&
+    isIntermediateItemsConfirmationPrompt(previousAssistantText) &&
+    (opts.draft.items ?? []).length > 0 &&
+    !opts.draft.awaiting_final_confirmation
+  ) {
+    return {
+      silenced: false,
+      finalText: buildContinuityFallback(opts.draft),
+      pixBlock: null,
+      pixKeyLabel: null,
+      pixKeyMessage: null,
+      sendMenuImage: false,
+    };
+  }
+
   // A confirmação final não depende mais de uma frase exata da IA. Procura a
   // última mensagem real do atendente imediatamente antes da resposta atual,
   // ignorando eventuais mensagens internas/ferramentas que possam ter entrado
   // entre o resumo e o "sim" do cliente. Isso elimina o loop em que o backend
   // esquecia que já havia pedido confirmação e mandava o mesmo resumo de novo.
   const confirmationRequestPattern =
-    /(est[aá] (?:correto|tudo certo|certinho)|confere|confirma(?:r)?(?: o pedido)?|pode (?:confirmar|fechar|finalizar)|posso (?:confirmar|fechar|finalizar)|podemos (?:confirmar|fechar|finalizar|concluir)|resumo do pedido|pedido est[aá] correto)/i;
+    /(resumo do (?:seu )?pedido|total a pagar|posso fechar o pedido|pode fechar o pedido|podemos fechar o pedido|confirmar o pedido final)/i;
   let previousAssistantRequestedConfirmation = false;
   if (lastUserIndex > 0) {
     for (let i = lastUserIndex - 1; i >= Math.max(0, lastUserIndex - 6); i--) {
@@ -3519,6 +3667,7 @@ async function runConversationalTurn(opts: {
       bairrosAtendidos: opts.bairrosAtendidos,
       bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
       ruasNaoAtendidas: opts.ruasNaoAtendidas,
+      currentUserText: lastUserText,
     });
 
     if (direct.result?.status === "ok") {
@@ -3607,6 +3756,7 @@ async function runConversationalTurn(opts: {
           bairrosAtendidos: opts.bairrosAtendidos,
           bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
           ruasNaoAtendidas: opts.ruasNaoAtendidas,
+          currentUserText: lastUserText,
         });
         if (pb) pixBlock = pb;
         if (pkl) pixKeyLabel = pkl;
@@ -3640,6 +3790,7 @@ async function runConversationalTurn(opts: {
           bairrosAtendidos: opts.bairrosAtendidos,
           bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
           ruasNaoAtendidas: opts.ruasNaoAtendidas,
+          currentUserText: lastUserText,
         });
         if (pb) pixBlock = pb;
         if (pkl) pixKeyLabel = pkl;
@@ -4350,6 +4501,16 @@ async function handleIncomingMessageUnlocked(
     await persistObviousProductMemoryFromTurn(supabaseAdmin, conversation.id, text, history, draft);
   } catch (err) {
     console.warn("[ORDER_MEMORY] Falha ao persistir item/quantidade:", err);
+  }
+
+  // ============ MEMÓRIA DETERMINÍSTICA DE ENDEREÇO ============
+  // "Av Brasil 324" já contém rua + número. Não deixamos essa informação
+  // depender de uma segunda interpretação probabilística da IA. O bairro que
+  // foi validado no início continua sendo reutilizado automaticamente.
+  try {
+    await persistDeterministicAddressFromTurn(supabaseAdmin, conversation.id, text, history, draft);
+  } catch (err) {
+    console.warn("[ORDER_MEMORY] Falha ao persistir endereço:", err);
   }
 
   // ============ CAPTURA DETERMINÍSTICA DE PAGAMENTO ============
