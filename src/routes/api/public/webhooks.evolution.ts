@@ -1870,6 +1870,46 @@ function normalizePaymentTiming(v: any): "now" | "delivery" | null {
   return null;
 }
 
+function previousAssistantAskedCustomerName(history: { role: string; content: string }[]): boolean {
+  const previous = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+  const t = normalizeStreet(previous);
+  return /\b(?:qual|informe|informar|diga|dizer|confirmar)\b.{0,45}\bnome\b|\bnome\b.{0,45}\b(?:pedido|receber|destinatario|cliente)\b/.test(t);
+}
+
+function extractPlausibleCustomerName(text: string): string | null {
+  const raw = String(text ?? "").trim().replace(/^[\s,.;:!?-]+|[\s,.;:!?-]+$/g, "");
+  if (!raw || raw.length < 2 || raw.length > 80) return null;
+  if (/\d/.test(raw)) return null;
+  const normalized = normalizeStreet(raw);
+  if (/\b(?:sim|nao|pix|cartao|credito|debito|entrega|retirada|endereco|rua|avenida|bairro|batata|costela|strogonoff|frango|pedido)\b/.test(normalized)) return null;
+  const cleaned = raw
+    .replace(/^(?:meu nome (?:e|é)|o nome (?:e|é)|nome[:\s]+|pode colocar|coloca|coloque)\s+/i, "")
+    .trim();
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 6) return null;
+  if (!words.every((w) => /^[A-Za-zÀ-ÖØ-öø-ÿ'’-]{2,}$/.test(w))) return null;
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+}
+
+async function persistDeterministicCustomerNameFromTurn(
+  supabaseAdmin: any,
+  conversationId: string,
+  text: string,
+  history: { role: string; content: string }[],
+  draft: Draft,
+): Promise<void> {
+  if (draft.customer_name || !previousAssistantAskedCustomerName(history)) return;
+  const customerName = extractPlausibleCustomerName(text);
+  if (!customerName) return;
+  const { error } = await supabaseAdmin
+    .from("order_drafts")
+    .update({ customer_name: customerName, awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
+    .eq("conversation_id", conversationId);
+  if (error) throw new Error(`Falha ao persistir nome do cliente: ${error.message}`);
+  draft.customer_name = customerName;
+  draft.awaiting_final_confirmation = false;
+}
+
 const PAYMENT_QUESTION_TEXT =
   "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador.";
 
@@ -2099,19 +2139,22 @@ function isExplicitOrderConfirmation(text: string): boolean {
     .trim();
   if (!t) return false;
 
-  // Respostas naturais de confirmação final. Não exige igualdade exata: frases
-  // como "sim, pode fechar", "pode fechar sim" e "está tudo certo, confirma"
-  // precisam encerrar o pedido na PRIMEIRA confirmação.
+  // A confirmação é interpretada pelo CONTEXTO do resumo oficial, e não por uma
+  // palavra mágica. Aceita confirmações humanas comuns/gírias sem reproduzir
+  // gírias na resposta da loja. Qualquer negação/correção explícita vence.
+  const negative = /\b(?:nao|errado|incorreto|corrigir|correcao|alterar|mudar|trocar|retirar|remover|espera|aguarda|pera|calma)\b/;
+  if (negative.test(t)) return false;
+
   const positive = [
-    /^sim(?:\s|$)/,
-    /(?:^|\s)confirmo(?:\s|$)/,
-    /(?:^|\s)pode (?:confirmar|fechar|finalizar|concluir)(?:\s|$)/,
-    /(?:^|\s)(?:esta|tudo) (?:correto|certo|certinho)(?:\s|$)/,
-    /(?:^|\s)isso mesmo(?:\s|$)/,
-    /^(?:ok|certo|correto|perfeito)$/,
+    /\bsim\b/,
+    /\bconfirm(?:o|ado|a|ar)\b/,
+    /\bpode\b.*\b(?:fechar|finalizar|concluir|fazer|mandar|seguir)\b/,
+    /\b(?:fecha|finaliza|conclui|manda|segue)\b/,
+    /\b(?:esta|ta|tudo)\s+(?:correto|certo|certinho|ok)\b/,
+    /\b(?:isso|isso ai|isso mesmo|e isso|exato|exatamente)\b/,
+    /^(?:ok|okay|certo|correto|perfeito|beleza|blz|show|fechou|demorou|combinado|joia|positivo|tranquilo|pode ser|bora|vamos|valeu)$/,
   ];
-  const negative = /\b(?:nao|não|errado|corrigir|alterar|mudar|espera|aguarda)\b/;
-  return !negative.test(t) && positive.some((re) => re.test(t));
+  return positive.some((re) => re.test(t));
 }
 
 // Base de RECONHECIMENTO de localidades de Duque de Caxias.
@@ -2639,8 +2682,22 @@ async function executeTool(
       }
     }
 
-    // Devolve a taxa calculada junto do resultado: sem isso a IA não sabia o
-    // valor liberado e seguia a conversa sem informar o frete ao cliente.
+    // Quando esta própria ferramenta acabou de calcular/aprovar o frete, o
+    // BACKEND informa a taxa em uma mensagem exclusiva. A IA não mistura
+    // "taxa + pagamento" no mesmo balão e não reformata o valor.
+    if (shouldCalculateFreight && draft.estimated_delivery_fee != null && draft.delivery_mode !== "pickup") {
+      const feeText = Number(draft.estimated_delivery_fee).toFixed(2).replace(".", ",");
+      await replyAndLog(
+        supabaseAdmin,
+        conversation.id,
+        conversation.phone,
+        `A taxa de entrega para seu endereço é de R$ ${feeText}.`,
+        { systemMessage: true },
+      );
+    }
+
+    // Devolve a taxa calculada junto do resultado: a próxima resposta da IA
+    // deve tratar SOMENTE do próximo dado faltante.
     return {
       result: {
         status: "draft_updated",
@@ -2648,7 +2705,7 @@ async function executeTool(
         distance_km: draft.estimated_distance_km ?? null,
         instruction:
           draft.estimated_delivery_fee != null && draft.delivery_mode !== "pickup"
-            ? `Informe agora ao cliente, de forma direta, que a taxa de entrega é R$ ${Number(draft.estimated_delivery_fee).toFixed(2).replace(".", ",")} e siga para o fechamento do pedido.`
+            ? `A taxa já foi confirmada pelo sistema. Não repita o valor junto com outra pergunta; siga apenas para o próximo dado faltante.`
             : undefined,
       },
     };
@@ -3792,7 +3849,7 @@ async function runConversationalTurn(opts: {
     try {
       const { data: recentOut } = await opts.supabaseAdmin
         .from("whatsapp_messages")
-        .select("body,direction,created_at")
+        .select("body,direction,media_type,created_at")
         .eq("conversation_id", opts.conversation.id)
         .eq("direction", "out")
         .not("body", "is", null)
@@ -3800,7 +3857,8 @@ async function runConversationalTurn(opts: {
         .limit(8);
       recentOfficialSummaryInDb = (recentOut ?? []).some((m: any) => {
         const body = String(m?.body ?? "");
-        return /resumo do (?:seu )?pedido/i.test(body) &&
+        return m?.media_type === "system" &&
+          /resumo do (?:seu )?pedido/i.test(body) &&
           /total a pagar/i.test(body) &&
           /(posso fechar o pedido|est[aá] tudo certo|pode fechar)/i.test(body);
       });
@@ -3811,9 +3869,7 @@ async function runConversationalTurn(opts: {
 
   const finalConfirmationAllowed =
     isExplicitOrderConfirmation(lastUserText) &&
-    (Boolean(opts.draft.awaiting_final_confirmation) ||
-      previousAssistantRequestedConfirmation ||
-      recentOfficialSummaryInDb);
+    (Boolean(opts.draft.awaiting_final_confirmation) || recentOfficialSummaryInDb);
 
   // Caminho determinístico: se o cliente acabou de confirmar explicitamente o
   // resumo, o backend fecha o pedido antes de consultar a IA. Assim o modelo
@@ -3838,7 +3894,7 @@ async function runConversationalTurn(opts: {
         .maybeSingle();
       if (claimError) {
         messages.push({ role: "system", content: `[falha ao reservar confirmação final] ${claimError.message}` });
-      } else if (!claimedConfirmation && !recentOfficialSummaryInDb && !previousAssistantRequestedConfirmation) {
+      } else if (!claimedConfirmation && !recentOfficialSummaryInDb) {
         return {
           silenced: true,
           finalText: "",
@@ -4013,6 +4069,33 @@ async function runConversationalTurn(opts: {
       continue;
     }
 
+    // O resumo final NÃO pode ser escrito livremente pela IA. Se o modelo tentar
+    // montar um resumo em texto (mesmo com todos os dados corretos), convertemos
+    // a intenção em `finalize_order`, que é quem calcula valores, grava o estado
+    // awaiting_final_confirmation e envia o resumo oficial do backend.
+    const looksLikeAiFinalSummary =
+      /resumo do (?:seu )?pedido/i.test(cleanedText) &&
+      /total a pagar/i.test(cleanedText) &&
+      /(posso fechar o pedido|est[aá] tudo certo|pode fechar)/i.test(cleanedText);
+    if (looksLikeAiFinalSummary && !opts.forceNoTools) {
+      const official = await executeTool("finalize_order", {}, {
+        supabaseAdmin: opts.supabaseAdmin, conversation: opts.conversation, draft: opts.draft, flags,
+        finalConfirmationAllowed: false, bairrosAtendidos: opts.bairrosAtendidos,
+        bairrosNaoAtendidos: opts.bairrosNaoAtendidos, ruasNaoAtendidas: opts.ruasNaoAtendidas,
+        currentUserText: lastUserText,
+      });
+      const officialStatus = String(official.result?.status ?? "");
+      if (flags.silenced || ["beverage_offer_sent", "final_confirmation_summary_sent"].includes(officialStatus)) {
+        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: flags.sendMenuImage ?? false };
+      }
+      if (officialStatus === "missing_fields") {
+        finalText = buildContinuityFallback(opts.draft);
+        break;
+      }
+      messages.push({ role: "system", content: `[resumo livre bloqueado; resultado do fechamento oficial] ${JSON.stringify(official.result)}` });
+      continue;
+    }
+
     // "Vou finalizar, um momento" sem ferramenta é um beco sem saída: depois
     // que esta resposta for enviada não existe execução futura automática.
     // O backend converte essa promessa vazia em progresso real.
@@ -4044,6 +4127,15 @@ async function runConversationalTurn(opts: {
       }
       messages.push({ role: "system", content: `[continuidade determinística] ${JSON.stringify(deterministicClose.result)}` });
       continue;
+    }
+
+    // Nunca permita que a IA anuncie pedido confirmado/finalizado por texto.
+    // A confirmação real só sai do retorno status=ok de finalize_order, que já
+    // gravou orders + order_items. Isso impede "pedido confirmado" sem pedido
+    // existente no sistema.
+    if (/\b(?:pedido|compra)\b.{0,25}\b(?:confirmad[oa]|finalizad[oa]|fechad[oa]|gerad[oa])\b/i.test(cleanedText)) {
+      finalText = buildContinuityFallback(opts.draft);
+      break;
     }
 
     finalText = cleanedText;
@@ -4799,18 +4891,40 @@ async function handleIncomingMessageUnlocked(
 
     if (immediateFreight.status === "resolved" && immediateFreight.fee != null) {
       const feeText = Number(immediateFreight.fee).toFixed(2).replace(".", ",");
-      const nextStep = buildContinuityFallback(draft);
-      const continuation = /taxa de entrega|s[oó] um instante/i.test(nextStep) ? "" : `\n\n${nextStep}`;
       await replyAndLog(
         supabaseAdmin,
         conversation.id,
         phone,
-        `A taxa de entrega para esse endereço é R$ ${feeText}.${continuation}`,
+        `A taxa de entrega para seu endereço é de R$ ${feeText}.`,
+        { systemMessage: true },
       );
+
+      // A taxa e a próxima pergunta são mensagens independentes. Isso mantém
+      // a conversa legível no WhatsApp e evita blocos de texto embolados.
+      const nextStep = buildContinuityFallback(draft);
+      if (!/taxa de entrega|s[oó] um instante/i.test(nextStep)) {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          nextStep,
+          { systemMessage: true },
+        );
+      }
       return Response.json({ ok: true, action: "freight_confirmed_and_flow_continued" });
     }
     // Se houve falha excepcional no cálculo, não encerra a conversa em silêncio:
     // deixa a IA continuar com o draft completo e o guardrail de continuidade.
+  }
+
+  // ============ MEMÓRIA DETERMINÍSTICA DO NOME ============
+  // Se a pergunta anterior pediu o nome e o cliente respondeu "Fábio",
+  // "Meu nome é Fábio", etc., o nome é salvo antes da IA. Assim o modelo não
+  // consegue usar o nome apenas no texto e esquecer de persistir no rascunho.
+  try {
+    await persistDeterministicCustomerNameFromTurn(supabaseAdmin, conversation.id, text, history, draft);
+  } catch (err) {
+    console.warn("[ORDER_MEMORY] Falha ao persistir nome:", err);
   }
 
   // ============ CAPTURA DETERMINÍSTICA DE PAGAMENTO ============
