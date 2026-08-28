@@ -870,7 +870,10 @@ function reconcileDraftItems(existingRaw: DraftItem[] | null | undefined, incomi
 function isSimpleConversationAffirmative(text: string): boolean {
   const t = normalizeStreet(text).replace(/[.,;:!?]+/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return false;
-  return /^(?:sim|isso|isso mesmo|correto|certo|certinho|perfeito|ok|exato|exatamente|pode ser|confirmo)$/.test(t);
+  // Entende confirmações naturais e gírias comuns sem reproduzi-las na resposta.
+  // O contexto (pergunta anterior) decide O QUE está sendo confirmado; esta função
+  // apenas reconhece que a fala do cliente é afirmativa.
+  return /^(?:sim|s|ss|isso|isso ai|isso mesmo|correto|certo|certinho|perfeito|ok|okay|blz|beleza|show|fechou|demorou|exato|exatamente|pode ser|pode|pode sim|confirmo|confirmado|ta certo|tudo certo|tranquilo|joia|positivo|combinado)$/.test(t);
 }
 
 function isIntermediateItemsConfirmationPrompt(text: string): boolean {
@@ -934,6 +937,104 @@ async function persistDeterministicAddressFromTurn(
   if (error) throw new Error(`Falha ao persistir endereço determinístico: ${error.message}`);
 }
 
+
+/**
+ * Garante que um endereço completo recém-informado nunca fique parado esperando
+ * uma segunda rodada da IA para calcular o frete. A memória determinística de
+ * endereço roda antes do modelo; portanto, depender apenas de `addressChanged`
+ * dentro de update_order_draft fazia o endereço já parecer "antigo" e pulava o
+ * popup. Esta função é chamada imediatamente após capturar rua+número.
+ */
+async function resolveFreightImmediatelyForCompleteDraft(
+  supabaseAdmin: any,
+  conversation: any,
+  draft: Draft,
+  bairrosAtendidos: string[],
+  bairrosNaoAtendidos: string[],
+  ruasNaoAtendidas: string[],
+): Promise<{ status: "not_needed" | "resolved" | "manual" | "failed"; fee?: number }> {
+  if (draft.delivery_mode === "pickup") return { status: "not_needed" };
+  if (!draft.address_street?.trim() || !draft.address_number?.trim() || !draft.address_neighborhood?.trim()) {
+    return { status: "not_needed" };
+  }
+  if (draft.estimated_delivery_fee != null) {
+    return { status: "resolved", fee: Number(draft.estimated_delivery_fee) };
+  }
+
+  try {
+    const { data: cfgRow } = await supabaseAdmin
+      .from("store_config")
+      .select("delivery_pricing_mode, store_lat, store_lng, google_maps_api_key, delivery_fee_tiers, default_delivery_fee, fixed_delivery_city")
+      .maybeSingle();
+    if (!cfgRow) return { status: "failed" };
+
+    const fullAddress = [draft.address_street, draft.address_number, draft.address_neighborhood]
+      .filter(Boolean)
+      .join(", ");
+    const rawResult = await calculateDeliveryFee(cfgRow as DeliveryConfig, fullAddress, {
+      supabaseAdmin,
+      phone: conversation.phone,
+    });
+    const result = applyBairroOverride(
+      rawResult,
+      draft.address_neighborhood,
+      bairrosAtendidos,
+      (cfgRow as any)?.default_delivery_fee ?? null,
+      draft.address_street,
+      bairrosNaoAtendidos,
+      ruasNaoAtendidas,
+    );
+
+    if (result.outOfArea) {
+      // Não reclassifica silenciosamente um bairro ativo. A proteção autoritativa
+      // de bairros continua sendo a fonte de verdade da cobertura.
+      const activeMatch = findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos);
+      if (activeMatch) result.outOfArea = false;
+    }
+
+    if (!result.outOfArea && result.fee != null) {
+      const { requestFreightApproval } = await import("@/lib/freight-approval.server");
+      const outcome = await requestFreightApproval(supabaseAdmin, {
+        conversationId: conversation.id,
+        phone: conversation.phone,
+        customerName: draft.customer_name ?? conversation.customer_name ?? null,
+        address: fullAddress,
+        fee: Number(result.fee),
+        distanceKm: result.distanceKm ?? null,
+      });
+      if (outcome.status === "rejected") {
+        await supabaseAdmin.from("whatsapp_conversations").update({ bot_paused: true }).eq("id", conversation.id);
+        return { status: "manual" };
+      }
+      if (outcome.fee != null) result.fee = Number(outcome.fee);
+    }
+
+    if (result.fee == null) return { status: "failed" };
+
+    draft.estimated_delivery_fee = Number(result.fee);
+    draft.estimated_distance_km = result.distanceKm;
+    draft.out_of_delivery_area = Boolean(result.outOfArea);
+    draft.awaiting_final_confirmation = false;
+
+    const { error } = await supabaseAdmin
+      .from("order_drafts")
+      .update({
+        estimated_delivery_fee: Number(result.fee),
+        estimated_distance_km: result.distanceKm,
+        out_of_delivery_area: Boolean(result.outOfArea),
+        awaiting_final_confirmation: false,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("conversation_id", conversation.id);
+    if (error) throw new Error(error.message);
+
+    return { status: "resolved", fee: Number(result.fee) };
+  } catch (err) {
+    console.error("[FREIGHT_IMMEDIATE] falha ao calcular/aprovar taxa:", err);
+    return { status: "failed" };
+  }
+}
+
 function significantProductTokens(name: string): string[] {
   const stop = new Set(["batata", "recheada", "de", "da", "do", "com", "e", "sabor", "cremoso", "cremosa", "crocante"]);
   return normalizeStreet(name).split(/\s+/).filter((x) => x.length >= 3 && !stop.has(x));
@@ -949,7 +1050,6 @@ async function persistObviousProductMemoryFromTurn(
   const qty = parseExplicitQuantityFromText(userText);
   const previousAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
   const previousAskedQuantity = /quantidade|quantas|quantos/.test(normalizeStreet(previousAssistant));
-  if (qty == null && !previousAskedQuantity) return;
 
   const { data: products } = await supabaseAdmin.from("products").select("name").eq("active", true);
   if (!products?.length) return;
@@ -964,6 +1064,68 @@ async function persistObviousProductMemoryFromTurn(
     });
   };
 
+  const existing = Array.isArray(draft.items) ? [...draft.items] : [];
+  const upsert = (canonicalName: string, quantity: number) => {
+    const key = normalizeStreet(canonicalName);
+    const idx = existing.findIndex((it) => normalizeStreet(it.product_name) === key);
+    if (idx >= 0) existing[idx] = { ...existing[idx], product_name: canonicalName, quantity };
+    else existing.push({ product_name: canonicalName, quantity });
+  };
+
+  // 1) Vários produtos + quantidade na MESMA frase.
+  // "uma de costela e uma de strogonoff", "1 costela + 2 pizza", etc.
+  // A versão anterior extraía apenas UM número global e, ao encontrar dois
+  // produtos, desistia e perguntava quantidade novamente.
+  const clauses = String(userText)
+    .split(/\s+(?:e|mais)\s+|[,;+]/i)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  let explicitItemsCaptured = 0;
+  for (const clause of clauses) {
+    const clauseQty = parseExplicitQuantityFromText(clause);
+    if (clauseQty == null) continue;
+    const clauseCandidates = candidatesFrom(clause);
+    if (clauseCandidates.length !== 1) continue;
+    upsert(String((clauseCandidates[0] as any).name), clauseQty);
+    explicitItemsCaptured++;
+  }
+
+  if (explicitItemsCaptured > 0) {
+    draft.items = existing;
+    draft.awaiting_final_confirmation = false;
+    const { error } = await supabaseAdmin
+      .from("order_drafts")
+      .update({ items: existing, awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
+      .eq("conversation_id", conversationId);
+    if (error) throw new Error(`Falha ao persistir itens explícitos: ${error.message}`);
+    return;
+  }
+
+  // 2) "uma de cada" / "2 de cada" em resposta à pergunta de quantidade.
+  // Recupera todos os produtos mencionados pelo cliente no turno anterior.
+  const normalizedCurrent = normalizeStreet(userText);
+  if (previousAskedQuantity && qty != null && /\b(?:de cada|cada um|cada uma)\b/.test(normalizedCurrent)) {
+    const previousUserTexts = [...history].reverse().filter((m) => m.role === "user").map((m) => m.content).slice(0, 6);
+    for (const oldText of previousUserTexts) {
+      const found = candidatesFrom(oldText);
+      if (found.length >= 2) {
+        for (const product of found) upsert(String((product as any).name), qty);
+        draft.items = existing;
+        draft.awaiting_final_confirmation = false;
+        const { error } = await supabaseAdmin
+          .from("order_drafts")
+          .update({ items: existing, awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
+          .eq("conversation_id", conversationId);
+        if (error) throw new Error(`Falha ao persistir quantidade de cada item: ${error.message}`);
+        return;
+      }
+    }
+  }
+
+  if (qty == null && !previousAskedQuantity) return;
+
+  // 3) Caso simples: um produto + uma quantidade, inclusive quantidade isolada
+  // em resposta à pergunta anterior.
   let candidates = candidatesFrom(userText);
   if (!candidates.length && qty != null && previousAskedQuantity) {
     const previousUserTexts = [...history].reverse().filter((m) => m.role === "user").map((m) => m.content).slice(0, 5);
@@ -974,16 +1136,13 @@ async function persistObviousProductMemoryFromTurn(
   }
   if (candidates.length !== 1 || qty == null) return;
 
-  const canonicalName = String((candidates[0] as any).name);
-  const existing = Array.isArray(draft.items) ? [...draft.items] : [];
-  const key = normalizeStreet(canonicalName);
-  const idx = existing.findIndex((it) => normalizeStreet(it.product_name) === key);
-  if (idx >= 0) existing[idx] = { ...existing[idx], product_name: canonicalName, quantity: qty };
-  else existing.push({ product_name: canonicalName, quantity: qty });
-
+  upsert(String((candidates[0] as any).name), qty);
   draft.items = existing;
   draft.awaiting_final_confirmation = false;
-  const { error } = await supabaseAdmin.from("order_drafts").update({ items: existing, awaiting_final_confirmation: false, updated_at: new Date().toISOString() }).eq("conversation_id", conversationId);
+  const { error } = await supabaseAdmin
+    .from("order_drafts")
+    .update({ items: existing, awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
+    .eq("conversation_id", conversationId);
   if (error) throw new Error(`Falha ao persistir memória de itens: ${error.message}`);
 }
 
@@ -2326,8 +2485,8 @@ async function executeTool(
     const shouldCalculateFreight =
       draft.delivery_mode !== "pickup" &&
       addressIsComplete &&
-      addressChanged &&
-      (!addressWasComplete || addressFieldsTouched);
+      draft.estimated_delivery_fee == null &&
+      (addressChanged || addressFieldsTouched || !addressWasComplete);
 
     if (shouldCalculateFreight) {
       try {
@@ -4596,14 +4755,62 @@ async function handleIncomingMessageUnlocked(
     console.warn("[ORDER_MEMORY] Falha ao persistir item/quantidade:", err);
   }
 
-  // ============ MEMÓRIA DETERMINÍSTICA DE ENDEREÇO ============
-  // "Av Brasil 324" já contém rua + número. Não deixamos essa informação
-  // depender de uma segunda interpretação probabilística da IA. O bairro que
-  // foi validado no início continua sendo reutilizado automaticamente.
+  // ============ MEMÓRIA DETERMINÍSTICA DE ENDEREÇO + FRETE ============
+  // "Av Brasil 324" já contém rua + número. Captura os dois e, quando isso
+  // completa o endereço com o bairro já validado, calcula IMEDIATAMENTE a taxa,
+  // abre o popup de aprovação e continua o atendimento na mesma rodada.
+  const addressBeforeDeterministic = [draft.address_street, draft.address_number, draft.address_neighborhood]
+    .map((x) => String(x ?? "").trim())
+    .join("|");
   try {
     await persistDeterministicAddressFromTurn(supabaseAdmin, conversation.id, text, history, draft);
   } catch (err) {
     console.warn("[ORDER_MEMORY] Falha ao persistir endereço:", err);
+  }
+  const addressAfterDeterministic = [draft.address_street, draft.address_number, draft.address_neighborhood]
+    .map((x) => String(x ?? "").trim())
+    .join("|");
+  const deterministicAddressChanged = addressAfterDeterministic !== addressBeforeDeterministic;
+  const deterministicAddressComplete = Boolean(
+    draft.delivery_mode === "delivery" &&
+    draft.address_street?.trim() && draft.address_number?.trim() && draft.address_neighborhood?.trim(),
+  );
+
+  if (deterministicAddressChanged && deterministicAddressComplete && draft.estimated_delivery_fee == null) {
+    await replyAndLog(
+      supabaseAdmin,
+      conversation.id,
+      phone,
+      "Só um instante enquanto confirmo a taxa de entrega para esse endereço.",
+    );
+
+    const immediateFreight = await resolveFreightImmediatelyForCompleteDraft(
+      supabaseAdmin,
+      conversation,
+      draft,
+      bairrosAtendidos,
+      bairrosNaoAtendidos,
+      ruasNaoAtendidas,
+    );
+
+    if (immediateFreight.status === "manual") {
+      return Response.json({ ok: true, action: "freight_manual_takeover" });
+    }
+
+    if (immediateFreight.status === "resolved" && immediateFreight.fee != null) {
+      const feeText = Number(immediateFreight.fee).toFixed(2).replace(".", ",");
+      const nextStep = buildContinuityFallback(draft);
+      const continuation = /taxa de entrega|s[oó] um instante/i.test(nextStep) ? "" : `\n\n${nextStep}`;
+      await replyAndLog(
+        supabaseAdmin,
+        conversation.id,
+        phone,
+        `A taxa de entrega para esse endereço é R$ ${feeText}.${continuation}`,
+      );
+      return Response.json({ ok: true, action: "freight_confirmed_and_flow_continued" });
+    }
+    // Se houve falha excepcional no cálculo, não encerra a conversa em silêncio:
+    // deixa a IA continuar com o draft completo e o guardrail de continuidade.
   }
 
   // ============ CAPTURA DETERMINÍSTICA DE PAGAMENTO ============
