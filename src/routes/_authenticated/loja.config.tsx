@@ -779,6 +779,31 @@ function ConfigPage() {
         </div>
       </Card>
 
+      <Card className="space-y-4 p-5" style={tabStyle("pagamentos")}>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="font-semibold">Stripe — cartão no cardápio digital</h2>
+            <p className="mt-1 text-xs text-muted-foreground">O cliente paga antes do pedido entrar no fluxo operacional. A confirmação do Stripe marca o pedido como pago automaticamente.</p>
+          </div>
+          <Switch checked={c.stripe_enabled === true} onCheckedChange={(v) => setC({ ...c, stripe_enabled: v })} />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <Label>Publishable key</Label>
+            <Input value={c.stripe_publishable_key || ""} onChange={(e) => setC({ ...c, stripe_publishable_key: e.target.value })} placeholder="pk_live_..." />
+          </div>
+          <div>
+            <Label>Secret key</Label>
+            <Input type="password" value={c.stripe_secret_key || ""} onChange={(e) => setC({ ...c, stripe_secret_key: e.target.value })} placeholder="sk_live_..." />
+          </div>
+          <div className="sm:col-span-2">
+            <Label>Webhook signing secret</Label>
+            <Input type="password" value={c.stripe_webhook_secret || ""} onChange={(e) => setC({ ...c, stripe_webhook_secret: e.target.value })} placeholder="whsec_..." />
+            <p className="mt-1 text-[11px] text-muted-foreground">No Stripe, cadastre o endpoint: <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/stripe` : "/api/public/webhooks/stripe"}</code></p>
+          </div>
+        </div>
+      </Card>
+
       <Card className="space-y-3 p-5" style={tabStyle("geral")}>
         <div className="flex items-center justify-between">
           <h2 className="font-semibold">Cardápio digital (site do cliente)</h2>
@@ -797,16 +822,20 @@ function ConfigPage() {
           <b>cardápio digital</b>. Quando desativado, a página mostra um aviso pedindo pra chamar no WhatsApp.
         </p>
         <div>
-          <Label>Link de pagamento (opcional)</Label>
-          <Input
-            value={c.payment_link_url || ""}
-            onChange={(e) => setC({ ...c, payment_link_url: e.target.value })}
-            placeholder="https://... (link de pagamento do seu banco/gateway)"
-          />
-          <p className="mt-1 text-xs text-muted-foreground">
-            Se preenchido, aparece a opção "Link de pagamento" no checkout do cardápio digital. O cliente finaliza o
-            pedido e é levado pra esse link. Deixe em branco pra esconder essa opção.
-          </p>
+          <Label>Formas aceitas no cardápio digital</Label>
+          <div className="mt-2 grid gap-2 sm:grid-cols-3">
+            {[
+              ["digital_menu_pix_enabled", "Pix antecipado"],
+              ["digital_menu_card_enabled", "Cartão via Stripe"],
+              ["digital_menu_cash_enabled", "Dinheiro antecipado"],
+            ].map(([field, label]) => (
+              <label key={field} className="flex items-center justify-between gap-3 rounded-xl border p-3 text-sm font-medium">
+                {label}
+                <Switch checked={c[field] !== false} onCheckedChange={(v) => setC({ ...c, [field]: v })} />
+              </label>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">Nenhuma dessas opções é pagamento na entrega. Pix e dinheiro ficam aguardando confirmação; cartão é confirmado automaticamente pelo Stripe.</p>
         </div>
       </Card>
 
