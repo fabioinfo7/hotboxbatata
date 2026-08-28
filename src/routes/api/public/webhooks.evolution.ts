@@ -1974,6 +1974,21 @@ function enforcePaymentQuestionPresentation(text: string, draft: Draft): string 
   return PAYMENT_QUESTION_TEXT;
 }
 
+function removeRedundantDeliveryFeeAnnouncement(text: string): string {
+  if (!text) return text;
+  const parts = text.split(/(?<=[.!?\n])/);
+  const cleaned = parts
+    .filter((part) => {
+      const normalized = normalizeStreet(part);
+      return !/(?:a )?taxa de entrega (?:para|pro|do|desse|deste|para esse|para este|para seu).{0,45}(?:e|é|fica|ficou|sera|será|de)\s*r\$/.test(normalized);
+    })
+    .join("")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return cleaned || text;
+}
+
 function inferPaymentFromCustomerTurn(
   text: string,
   history: { role: string; content: string }[],
@@ -4353,8 +4368,24 @@ async function runConversationalTurn(opts: {
   const noRepeatSafeText = enforceNoRepeatedKnownQuestion(salesFlowSafeText, opts.draft);
   const paymentSafeText = enforcePaymentQuestionPresentation(noRepeatSafeText, opts.draft);
 
+  // Se o backend já anunciou a taxa aprovada anteriormente, a IA não pode
+  // anunciá-la de novo em outro balão. A única exceção é quando o próprio
+  // cliente pergunta novamente pelo frete/taxa. O resumo oficial não passa por
+  // este texto livre: ele é enviado diretamente pelo backend e continua
+  // mostrando a taxa normalmente.
+  let duplicateFeeSafeText = paymentSafeText;
+  const customerAskedFeeAgain = /(taxa|frete|valor da entrega|quanto.*entrega)/i.test(lastUserText);
+  if (!customerAskedFeeAgain && opts.draft.delivery_mode !== "pickup" && opts.draft.estimated_delivery_fee != null) {
+    const feeWasAlreadyAnnounced = await wasDeliveryFeeAlreadyAnnounced(
+      opts.supabaseAdmin,
+      opts.conversation.id,
+      Number(opts.draft.estimated_delivery_fee),
+    );
+    if (feeWasAlreadyAnnounced) duplicateFeeSafeText = removeRedundantDeliveryFeeAnnouncement(paymentSafeText);
+  }
+
   return {
-    finalText: paymentSafeText,
+    finalText: duplicateFeeSafeText,
     pixBlock,
     pixKeyLabel,
     pixKeyMessage,
@@ -4898,6 +4929,21 @@ async function handleIncomingMessageUnlocked(
         : (m.body ?? ""),
     }));
 
+  // ============ PRIMEIRO CONTATO: BAIRRO SEMPRE PRIMEIRO ============
+  // Regra comercial autoritativa: no PRIMEIRO contato do cliente, não importa
+  // de onde ele veio (Meta/CTWA, Evolution, link direto etc.) nem o que escreveu
+  // na primeira mensagem. O sistema NÃO responde a pergunta inicial, NÃO mostra
+  // cardápio/preço e NÃO inicia coleta de pedido. A única ação automática é
+  // cumprimentar conforme o horário e pedir o bairro. Como esta trava roda em
+  // código antes da classificação de bairro e antes da IA, nenhum prompt ou
+  // origem da conversa consegue pular essa etapa.
+  const assistantTurnsBeforeThisContact = history.filter((m) => m.role === "assistant").length;
+  if (assistantTurnsBeforeThisContact === 0) {
+    const greetingText = `${greetingByTimeBR()}! Para que o atendente possa dar continuidade no seu atendimento, informe seu bairro por favor.`;
+    await replyAndLog(supabaseAdmin, conversation.id, phone, greetingText, { systemMessage: true });
+    return Response.json({ ok: true, action: "first_contact_neighborhood_required" });
+  }
+
   // ============ RECONCILIAÇÃO DETERMINÍSTICA DO BAIRRO ============
   // A lista POSITIVA ativa de bairros atendidos é a fonte de verdade absoluta.
   // Se um bairro atendido já foi validado no início do atendimento, ele pertence
@@ -5108,6 +5154,36 @@ async function handleIncomingMessageUnlocked(
   const deterministicPayment = inferPaymentFromCustomerTurn(text, history, draft);
   if (deterministicPayment) {
     await persistDeterministicPayment(supabaseAdmin, conversation.id, draft, deterministicPayment);
+
+    // Depois que a forma de pagamento foi registrada, o backend assume a
+    // sequência final do atendimento. Não deixamos a IA decidir se já pode
+    // perguntar "Posso fechar?". Se todos os demais dados obrigatórios estão
+    // completos, finalize_order oferece a bebida (uma única vez) e somente
+    // depois da resposta do cliente envia o resumo oficial com total + pergunta
+    // de confirmação. Isso elimina o salto PAGAMENTO -> POSSO FECHAR.
+    const structurallyReadyAfterPayment =
+      Boolean(draft.customer_name && draft.delivery_mode && (draft.items ?? []).length && draft.payment_method) &&
+      (draft.delivery_mode === "pickup" ||
+        Boolean(draft.address_street && draft.address_number && draft.address_neighborhood && draft.estimated_delivery_fee != null));
+
+    if (structurallyReadyAfterPayment && !draft.awaiting_final_confirmation) {
+      const deterministicFlags: { silenced?: boolean; sendMenuImage?: boolean } = {};
+      const next = await executeTool("finalize_order", {}, {
+        supabaseAdmin,
+        conversation,
+        draft,
+        flags: deterministicFlags,
+        finalConfirmationAllowed: false,
+        bairrosAtendidos,
+        bairrosNaoAtendidos,
+        ruasNaoAtendidas,
+        currentUserText: text,
+      });
+      const nextStatus = String(next.result?.status ?? "");
+      if (deterministicFlags.silenced || ["beverage_offer_sent", "final_confirmation_summary_sent", "awaiting_final_confirmation"].includes(nextStatus)) {
+        return Response.json({ ok: true, action: nextStatus || "post_payment_flow_continued" });
+      }
+    }
   }
 
   // ============ CARDÁPIO RESPEITA O CANAL DEFINIDO PELO BAIRRO ============
