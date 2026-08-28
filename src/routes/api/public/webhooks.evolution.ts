@@ -737,21 +737,6 @@ function summarizeDraft(d: Draft): string {
   return lines.length ? lines.join("\n") : "(nada coletado ainda)";
 }
 
-function buildContinuityFallback(draft: Draft): string {
-  const items = Array.isArray(draft.items) ? draft.items : [];
-  if (!items.length) return "Entendi. Para continuar seu pedido, qual sabor você gostaria de pedir, por favor?";
-  if (!draft.delivery_mode) return "Perfeito. Para continuar, o pedido será para entrega ou retirada, por favor?";
-  if (draft.delivery_mode === "delivery" && (!draft.address_street || !draft.address_number)) {
-    return "Qual seria o endereço de entrega, por favor? Pode me informar a rua e o número.";
-  }
-  if (!draft.customer_name) return "Para continuar, qual é o nome de quem vai receber o pedido, por favor?";
-  if (!draft.payment_method) {
-    return "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador.";
-  }
-  if (draft.awaiting_final_confirmation) return "Está tudo certo? Posso fechar o pedido?";
-  return "Perfeito. Vou seguir com o fechamento do seu pedido. Se estiver tudo certo com as informações enviadas, pode me confirmar, por favor?";
-}
-
 async function buildFinalConfirmationSummary(
   supabaseAdmin: any,
   d: Draft,
@@ -802,7 +787,7 @@ async function buildFinalConfirmationSummary(
     `*Subtotal:* ${brl(subtotal)}\n` +
     (d.delivery_mode === "pickup" ? "" : `*Taxa de entrega:* ${brl(deliveryFee)}\n`) +
     `*Total a pagar:* ${brl(total)}\n\n` +
-    `Posso fechar o pedido?`;
+    `Está tudo correto?`;
   return { text, subtotal, deliveryFee, total, unmatched };
 }
 
@@ -926,7 +911,7 @@ const TOOLS = [
             },
           },
           payment_method: { type: "string", enum: ["pix", "card"] },
-          card_type: { type: "string", enum: ["credit", "debit"], description: "Opcional. A operação registra cartão de forma genérica; não pergunte crédito ou débito ao cliente." },
+          card_type: { type: "string", enum: ["credit", "debit"], description: "Obrigatório quando payment_method=card: credit para crédito à vista, debit para débito." },
           payment_timing: { type: "string", enum: ["now", "delivery"] },
           notes: { type: "string" },
         },
@@ -938,7 +923,7 @@ const TOOLS = [
     function: {
       name: "finalize_order",
       description:
-        "Prepara o fechamento do pedido. Só chame quando TODOS os dados obrigatórios já estiverem completos: nome, endereço atual deste pedido, itens e forma de pagamento. Não é necessário perguntar crédito/débito nem quando o pagamento será feito. O backend oferece bebida (se faltar), envia o resumo com TOTAL, pede uma única confirmação e, após a confirmação, informa o prazo e cria o pedido automaticamente.",
+        "Fecha e registra definitivamente o pedido. Só chame quando TODOS os dados obrigatórios já tiverem sido confirmados pelo cliente: nome, endereço completo, itens, forma de pagamento, e se paga agora ou na entrega.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -1066,7 +1051,7 @@ ${conversationStageText}
 - BAIRRO PRIMEIRO: para ENTREGA, antes de mostrar cardápio, preço, promoção ou iniciar pedido, o bairro precisa estar identificado. Se ainda não estiver, peça SOMENTE o bairro.
 - Se o bairro não estiver na lista oficial de bairros atendidos pelo WhatsApp, NÃO revele preços nem envie a imagem do cardápio do WhatsApp. Redirecione para iFood/99Food e informe que o cardápio e os valores corretos para aquela região estão na plataforma. O cardápio do WhatsApp só pode ser enviado depois que o bairro estiver validado como atendido pela entrega própria, ou quando o cliente optar claramente por RETIRADA.
 - RETIRADA é exceção: se o cliente disser claramente que vai retirar, não peça bairro nem endereço.
-- PAGAMENTO: a loja aceita SOMENTE Pix ou cartão. Cartão pode ser crédito ou débito, mas NÃO pergunte qual dos dois: registre apenas "cartão". DINHEIRO EM ESPÉCIE NÃO É ACEITO e nunca existe pergunta sobre troco. Quando chegar a etapa de pagamento e esse dado estiver faltando, pergunte exatamente: "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador." NÃO pergunte se o pagamento será agora ou na entrega. Se o cliente disser apenas "Pix", registre Pix e siga o fluxo; se disser espontaneamente "Pix agora", respeite essa informação.
+- PAGAMENTO: a loja aceita SOMENTE Pix, cartão de crédito à vista ou cartão de débito. DINHEIRO EM ESPÉCIE NÃO É ACEITO e nunca existe pergunta sobre troco. Quando chegar a etapa de pagamento e esse dado estiver faltando, pergunte de forma clara e completa: "Qual será a forma de pagamento? Aceitamos cartões de crédito e débito ou Pix para pagamento agora ou na entrega via QR Code. Não recebemos dinheiro em espécie, para segurança do entregador." Não induza o cliente a escolher Pix. Se ele responder apenas "cartão", pergunte se é crédito ou débito. Se responder Pix sem dizer quando deseja pagar, pergunte apenas se prefere pagar agora ou na entrega via QR Code.
 - PRAZO DE ENTREGA: para pedidos de entrega própria, informe sempre prazo de ATÉ 40 MINUTOS, ressaltando que a maioria das entregas acontece antes e que o cliente receberá atualizações pelo WhatsApp. Nunca informe 45 minutos e nunca prometa horário exato.
 - LOCALIZAÇÃO DA LOJA: se perguntarem onde fica, informe "Rua Carlos Chagas, em Jardim Gramacho" e diga naturalmente que trabalhamos somente com delivery. Nunca informe o número 492 ao cliente. O número existe apenas para uso interno/cálculo de rota.
 - PREÇO: use exclusivamente o preço efetivo do CARDÁPIO ATIVO AGORA; quando houver promoção ativa no sistema, esse preço promocional é o valor válido.
@@ -1094,14 +1079,6 @@ Um atendente de verdade nunca despeja um monte de informação não pedida em ci
 
 🔒 SEGURANÇA E CONFIANÇA: o cliente precisa sentir que está numa loja de verdade, com alguém confiável do outro lado. Confirme cada informação importante antes de seguir (ex: repita o pedido antes de fechar), nunca deixe uma pergunta sem resposta, e se algo der errado (erro técnico, produto indisponível), explique com calma o que fazer a seguir em vez de deixar o cliente sem rumo. Precisão em cima de tudo — é melhor confirmar de novo do que errar um dado do pedido.
 
-🚨 REGRA INVIOLÁVEL DE CONTINUIDADE DO ATENDIMENTO:
-- O atendimento NUNCA pode parar no meio enquanto existir uma conversa/pedido em andamento. Toda mensagem do cliente deve resultar em uma resposta útil ou em uma ação concreta do backend seguida da continuação do fluxo.
-- Se houver ambiguidade (produto, sabor, quantidade, endereço, pagamento ou qualquer outro dado), faça UMA pergunta objetiva de esclarecimento. Quando o cliente responder, use essa resposta para resolver a ambiguidade e CONTINUE imediatamente do ponto em que parou, sem reiniciar o atendimento e sem ficar em silêncio.
-- Exemplo de produto ambíguo: se o cliente disser "a de bacon" e houver mais de um produto com bacon, ofereça somente as opções reais candidatas. Quando ele escolher uma delas, registre o nome EXATO do produto escolhido e já siga para o próximo dado que falta no pedido.
-- Depois de executar update_order_draft, lookup_place_address, ferramenta de produto, alteração ou qualquer outra ferramenta, se ainda faltar algo para fechar o pedido, sua resposta seguinte DEVE pedir exatamente o próximo dado faltante. Nunca termine uma rodada apenas porque uma ferramenta foi executada.
-- Se o cliente corrigir uma informação que você entendeu errado, reconheça a correção de forma breve, atualize o dado e continue o fluxo no mesmo turno.
-- Só é permitido encerrar o atendimento quando: (1) o pedido foi efetivamente criado/finalizado, (2) o cliente cancelou/desistiu explicitamente, (3) houve handoff humano explícito, ou (4) o cliente encerrou a conversa. Fora disso, sempre conduza ao próximo passo.
-
 Você também é um ótimo vendedor, do nível dos melhores atendentes de delivery — sabe aumentar o ticket médio sem parecer vendedor, de um jeito tão natural que o cliente nem percebe que está sendo "vendido":
 - 🥤 OFERTA DE BEBIDA NO FECHAMENTO — MUITO IMPORTANTE: se o pedido não tiver nenhuma bebida entre os itens, ANTES de chamar finalize_order você é OBRIGADA a oferecer bebida de forma discreta e natural (ex: "pra fechar, quer levar alguma bebida também?"), já citando as opções de bebida realmente disponíveis no CARDÁPIO ATIVO AGORA (nome e preço, formatadas como no restante do prompt) — nunca pergunte "quer bebida?" sem dizer quais existem. Ofereça uma vez só: se o cliente disser que não quer (ou ignorar e seguir pra outra coisa), não insista, siga direto pra finalizar o pedido. Se o pedido já tem alguma bebida, não ofereça de novo. Essa oferta acontece exatamente no fechamento do pedido — é a única sugestão de venda deste prompt que funciona assim (as outras têm o timing descrito abaixo).
 - Não ofereça complemento/adicional pago que não esteja estruturado no cardápio do sistema. Só pode sugerir outro PRODUTO real cadastrado e ativo.
@@ -1115,17 +1092,17 @@ Você também é um ótimo vendedor, do nível dos melhores atendentes de delive
 Sua missão é coletar, ao longo da conversa (não precisa tudo de uma vez, vá perguntando naturalmente conforme a conversa flui, só depois que o cliente já demonstrou que quer pedir algo), os dados necessários pra fechar o pedido:
 - Nome de quem vai receber esse pedido específico${pushName ? ` (o nome do WhatsApp de quem está conversando é "${pushName}", mas pode não ser o nome real, ou pode estar pedindo pra outra pessoa — confirme)` : ""}
 - Se é pra ENTREGAR ou se o cliente vai RETIRAR na loja — pergunte isso naturalmente cedo na conversa (ex: "é pra entrega ou você prefere buscar aqui?"). Isso muda tudo o que vem depois.
-- Se for entrega: depois que o cliente demonstrar intenção de fazer o pedido e os itens estiverem definidos, pergunte "Qual seria o endereço de entrega, por favor?". Para o endereço atual do pedido, rua e número precisam ser informados pelo cliente. O BAIRRO JÁ VALIDADO NO INÍCIO DA CONVERSA CONTINUA VÁLIDO E DEVE SER REUTILIZADO AUTOMATICAMENTE — NUNCA peça o bairro novamente se ele já foi confirmado neste atendimento. Exemplo: bairro validado = "Chacrinha"; cliente depois responde "Rua Andaraí, 10" → registre rua=Rua Andaraí, número=10 e mantenha bairro=Chacrinha. Só pergunte bairro novamente se nenhum bairro tiver sido validado ainda ou se o próprio cliente disser que quer corrigir/mudar o bairro. NUNCA revele ao cliente um endereço salvo de pedidos anteriores e nunca pergunte se é "o mesmo endereço". Se quiser passar referência, ótimo, mas não é obrigatório. NUNCA pergunte a cidade. Se for retirada, NÃO precisa de endereço nenhum — pula direto pros itens.
-- 🚨 CHAME update_order_draft NA HORA ASSIM QUE TIVER RUA + NÚMERO E JÁ EXISTIR BAIRRO VALIDADO NA CONVERSA. Não espere o cliente repetir o bairro. O sistema deve combinar rua+número recém-informados com o bairro validado no início e calcular a taxa imediatamente. Se o cliente informar um novo bairro explicitamente, aí sim atualize o bairro e revalide antes de calcular.
+- Se for entrega: rua, número e bairro (só isso é obrigatório). Se o cliente quiser passar um ponto de referência, ótimo — ajuda muito o entregador — mas não é obrigatório, não insista se ele não mencionar. NUNCA pergunte a cidade — a loja só entrega numa cidade só, então isso já é preenchido automaticamente, não faz parte da conversa. Se for retirada, NÃO precisa de endereço nenhum — pula direto pros itens.
+- 🚨 CHAME update_order_draft NA HORA, ASSIM QUE RUA + NÚMERO + BAIRRO ESTIVEREM COMPLETOS — nunca espere juntar endereço + itens + pagamento pra chamar tudo de uma vez só perto do fechamento. O cálculo da taxa de entrega (e a confirmação da loja) tem que acontecer logo que o endereço é confirmado, ainda no meio da conversa, não coladinho no fechamento do pedido — isso evita atraso bem na hora de finalizar. Assim que tiver rua+número+bairro confirmados pelo cliente, chame update_order_draft imediatamente com esses três campos, mesmo que ainda faltem itens ou pagamento, e só depois continue perguntando o resto.
 - Itens do pedido — use SOMENTE os nomes e preços exatos do cardápio abaixo, nunca invente produto nem preço
-- QUANTIDADE INTELIGENTE — NUNCA pergunte quantidade quando ela já estiver explícita na frase do cliente. Artigos e números contam como quantidade: "uma de costela", "uma costela", "1 costela" = 1 unidade; "duas de pizza", "2 de pizza" = 2 unidades; "quero uma" = 1 unidade. Absorva a quantidade junto com o produto e chame update_order_draft. Só pergunte quantidade se realmente nenhuma quantidade puder ser inferida do que o cliente disse.
-- Forma de pagamento: quando esse dado estiver faltando, pergunte exatamente: "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador." Não favoreça nenhuma opção. Se o cliente disser "cartão", registre CARTÃO e continue — NUNCA pergunte crédito ou débito. Se disser "Pix", registre PIX e continue — NUNCA pergunte se será agora ou na entrega. Se ele espontaneamente disser "Pix agora", respeite essa informação.
+- Forma de pagamento: quando esse dado estiver faltando, pergunte exatamente de forma clara e neutra: "Qual será a forma de pagamento? Aceitamos cartões de crédito e débito ou Pix para pagamento agora ou na entrega via QR Code. Não recebemos dinheiro em espécie, para segurança do entregador." Não favoreça nenhuma opção. Se o cliente disser apenas cartão, pergunte se é crédito ou débito. Se disser Pix sem indicar o momento, pergunte se prefere pagar agora ou na entrega via QR Code.
+- Se for Pix e o cliente ainda não tiver informado o momento do pagamento: pergunte se prefere pagar agora pelo chat ou na entrega via QR Code.
 - Se o cliente pedir dinheiro em espécie, explique com educação que, por segurança do entregador, a loja não trabalha com dinheiro e peça para escolher Pix, crédito à vista ou débito. Nunca pergunte sobre troco.
 
 ⚠️ PEDIDOS MÚLTIPLOS PRO MESMO ENDEREÇO — MUITO IMPORTANTE:
 Às vezes um cliente pede várias coisas de uma vez só que na verdade são pedidos SEPARADOS pra pessoas diferentes com pagamentos diferentes, tudo pro mesmo endereço (ex: "manda 3 lanches, um pra mim no pix, um pro meu irmão no débito, e um pra minha esposa no crédito"). Nesse caso:
 1. Trate cada um como um pedido individual — colete nome do destinatário + itens dele + forma de pagamento dele, e chame finalize_order pra CADA UM separadamente, um de cada vez.
-2. Só reutilize o endereço entre vários pedidos separados quando o próprio cliente tiver deixado claro que todos são para o mesmo endereço nesta conversa. Nunca revele um endereço histórico nem pergunte "é o mesmo endereço?". Em um novo pedido sem essa indicação explícita, pergunte: "Qual seria o endereço de entrega, por favor?".
+2. O endereço já fica salvo automaticamente entre um pedido e outro dentro dessa conversa — você NÃO precisa perguntar o endereço de novo pro segundo, terceiro pedido, etc.
 3. NUNCA esqueça que ainda faltam pedidos da mesma leva. Se o cliente disse "3 lanches" e você já fechou 1, você SABE que ainda faltam 2 — continue perguntando os dados do próximo, não comece do zero nem trate como se fosse tudo terminado.
 4. Só depois de fechar TODOS os pedidos que o cliente pediu daquela vez, pergunte se ele deseja mais alguma coisa.
 🚫 ERRO GRAVE A NUNCA COMETER: quando são pessoas diferentes, cada uma é UM pedido próprio, chamado com update_order_draft usando quantity 1 (ou a quantidade que aquela pessoa específica pediu) e UM customer_name e UM payment_method — seguido de finalize_order antes de começar o próximo. NUNCA registre isso como um item só com quantity somada (ex: "3x Batata Recheada" com um único customer_name e um único payment_method) — isso mistura pessoas e formas de pagamento diferentes num pedido só, o que está errado mesmo que o produto seja idêntico para as três pessoas. Cada finalize_order fecha exatamente 1 pedido de 1 pessoa com 1 forma de pagamento.
@@ -1139,10 +1116,15 @@ ${unavailableText ? `\nSEM ESTOQUE HOJE (não ofereça, avise se perguntarem por
 ${deliveryInfoText}
 PRAZO DE ENTREGA DA LOJA: até 40 minutos após a confirmação do pedido; a maioria das entregas acontece antes. O cliente acompanha as atualizações pelo WhatsApp.
 ${businessHoursText ? `HORÁRIO DE ATENDIMENTO DA LOJA: ${businessHoursText}. Se o cliente perguntar o horário de funcionamento, responda exatamente com esses dias e horas — nunca invente outro horário.` : ""}
-FORMAS DE PAGAMENTO ACEITAS: Pix ou cartão (crédito ou débito). Ao perguntar, peça somente a FORMA de pagamento; nunca pergunte se será agora ou na entrega e nunca pergunte crédito ou débito. Dinheiro em espécie não é aceito, por segurança do entregador.
+FORMAS DE PAGAMENTO ACEITAS: Cartão de crédito à vista, cartão de débito e Pix. O Pix pode ser pago agora pelo chat ou na entrega via QR Code. Dinheiro em espécie não é aceito, por segurança do entregador.
 
 ${lastOrderText ? `CONTEXTO — ÚLTIMO PEDIDO DESSE CLIENTE:\n${lastOrderText}\nSe o cliente comentar, perguntar sobre esse pedido, ou só agradecer, responda com base nesse contexto (não tente vender de novo nem reinicie o atendimento do zero, a menos que ele peça algo novo claramente). Se ele pedir algo novo, é um pedido novo — pode seguir o fluxo normal.\n` : ""}
-${lastAddressText ? `🏠 CONTEXTO INTERNO: existe um endereço histórico desse cliente, mas ele NÃO é confirmação do endereço deste novo pedido. NUNCA revele, cite, sugira nem pergunte "é o mesmo endereço?". Para todo novo pedido de entrega, pergunte de forma simples e educada: "Qual seria o endereço de entrega, por favor?" e use somente o endereço que o cliente informar nesta conversa. O endereço histórico serve apenas como contexto interno e jamais deve ser copiado automaticamente para o novo pedido.
+${lastAddressText ? `🏠 CLIENTE JÁ CONHECIDO — ENDEREÇO E TAXA SALVOS: ${lastAddressText}
+REGRA OBRIGATÓRIA PARA ESSE CLIENTE: assim que ele indicar que quer fazer um pedido para entrega (não na saudação inicial — só quando ficar claro que vai pedir), IMEDIATAMENTE pergunte de forma natural: "A entrega vai ser para [endereço completo salvo]?" — ANTES de pedir qualquer endereço. Não espere ele começar a digitar o endereço.
+- Se confirmar ("sim", "pode ser", "esse mesmo", etc.): chame update_order_draft COM TODOS OS CAMPOS DO ENDEREÇO SALVO (rua, número, bairro, complemento e referência se houver) — exatamente como estão escritos acima — e continue o atendimento normalmente. O sistema vai calcular a taxa oficial; você não precisa informar a taxa antes de update_order_draft retornar.
+- Se informar outro endereço: use o novo normalmente.
+- NUNCA registre o endereço salvo no pedido sem a confirmação explícita do cliente nesta conversa.
+- NUNCA pergunte o endereço do zero para esse cliente antes de perguntar se vai ser no endereço salvo.
 ` : ""}
 
 🚨 REGRA ABSOLUTA — FONTE ÚNICA DE VERDADE SOBRE O NEGÓCIO: as ÚNICAS informações reais sobre produtos, categorias, ingredientes, preços, estoque, taxa de entrega e formas de pagamento são as que estão escritas em "CATEGORIAS DISPONÍVEIS" e "CARDÁPIO ATIVO AGORA" logo abaixo — geradas agora mesmo, direto do sistema da loja. Você NÃO tem conhecimento próprio sobre o que essa loja vende. Nunca complete com o que é "comum" ou "esperado" numa loja desse tipo, mesmo que pareça um item genérico e óbvio de delivery — se não está escrito abaixo, a loja não tem, e mencionar isso pro cliente é um erro grave.
@@ -1155,14 +1137,13 @@ Regras importantes:
 - NUNCA invente informação que não está listada acima (produto, categoria, ingrediente, preço, prazo, promoção). Se genuinamente não tiver a informação, diga que vai confirmar com a loja — mas isso deve ser raríssimo, porque quase tudo já está descrito acima.
 - Sempre que o cliente informar ou confirmar algo das categorias acima, chame update_order_draft com os campos atualizados — pode chamar várias vezes na mesma conversa.
 - Nunca repita uma pergunta sobre algo que já está em "o que já sei acima".
-- 🚨 REGRA ANTI-LOOP DO RESUMO: depois que o resumo oficial for enviado, NÃO repita o resumo em resposta a confirmação. Respostas afirmativas como "sim", "pode", "pode fechar", "pode finalizar", "confirmo", "está certo", "tudo certo", "perfeito", "fechado", "beleza" ou equivalentes significam CONFIRMAÇÃO FINAL e devem fechar o pedido imediatamente. O resumo só pode ser enviado novamente se o cliente realmente alterar item, quantidade, endereço, nome, forma de pagamento ou outro dado que mude o pedido.
-- 🚨 CONFIRMAÇÃO FINAL OBRIGATÓRIA: É PROIBIDO pedir confirmação enquanto faltar qualquer dado obrigatório. Primeiro complete itens + nome + endereço atual + taxa + forma de pagamento. NÃO existe pergunta adicional sobre crédito/débito nem sobre pagamento agora/na entrega. Se não houver bebida, o BACKEND oferece as bebidas ativas UMA VEZ e aguarda a resposta. Se o cliente adicionar bebida, atualize os itens; se recusar, apenas siga. IMEDIATAMENTE depois da resposta sobre bebida, o BACKEND deve enviar UMA ÚNICA VEZ o resumo oficial com cada item e valor, endereço, pagamento, subtotal, taxa e *TOTAL A PAGAR*, terminando com "Está tudo certo? Posso fechar o pedido?". É PROIBIDO pular o resumo e perguntar apenas "posso finalizar?". Na PRIMEIRA resposta afirmativa ao resumo, o backend informa o prazo de até 40 minutos e cria o pedido automaticamente NA MESMA RODADA, sem aguardar nova aprovação e sem ficar em silêncio.
+- 🚨 CONFIRMAÇÃO FINAL OBRIGATÓRIA: É PROIBIDO pedir confirmação enquanto faltar qualquer dado obrigatório, especialmente forma de pagamento/tipo/momento. Primeiro complete itens + nome + endereço + taxa + pagamento. Quando tudo estiver completo, chame finalize_order: o BACKEND enviará UMA ÚNICA VEZ o resumo oficial, sempre com itens, endereço, pagamento, subtotal, taxa e *TOTAL A PAGAR*, e perguntará se está correto. Não escreva um segundo resumo por conta própria. Na PRIMEIRA resposta afirmativa do cliente (ex: "sim", "correto", "pode confirmar"), o backend deve criar o pedido automaticamente na mesma rodada, informar o prazo de até 40 minutos e NÃO aguardar nenhuma nova aprovação.
 - 🚨 NOME DO CLIENTE É OBRIGATÓRIO — SEMPRE: antes de chamar finalize_order, o campo customer_name PRECISA estar preenchido com um nome real dito pelo cliente NESTA conversa. Se você ainda não sabe o nome, NÃO chame finalize_order — pergunte primeiro, de forma natural (ex: "pra fechar aqui, qual o nome pra colocar no pedido?"). Nunca use o nome do WhatsApp (pushName) sem confirmar com o cliente que é ele mesmo. Nunca finalize com nome vazio, nem com "Cliente", "Sem nome" ou qualquer variação genérica.
 - IMPORTANTE: o resumo em "O QUE JÁ SEI" pode conter dados de uma sessão antiga que o cliente nunca confirmou agora — nunca finalize só porque os campos aparecem preenchidos ali. Só finalize se você consegue apontar, na conversa atual, o momento em que o cliente confirmou cada dado.
 - Nunca finalize sem o cliente ter claramente confirmado os itens do pedido.
 - Se o cliente perguntar sobre ingredientes, sabores, bebidas, preços, tempo ou taxa de entrega, responda com base EXATAMENTE nas informações acima. Para ingredientes, use prioritariamente o campo “Ingredientes” exibido no CARDÁPIO ATIVO, que vem do cadastro do produto; nunca invente. Se aparecer “Ingredientes: não cadastrados”, diga apenas que vai confirmar a composição com a equipe antes de garantir. Se o campo Ingredientes de um produto não mencionar um ingrediente específico que o cliente perguntou (ex: "tem queijo?", "vem com bacon?"), NUNCA chute — responda com naturalidade que vai confirmar essa informação com a cozinha antes de garantir. Nunca prometa complemento, molho, acompanhamento ou variação que não esteja informado no cadastro do produto.
 - Se pedirem algo que não existe no cardápio, diga com naturalidade que não tem esse item e sugira o mais parecido do cardápio.
-- 🚨 VALOR DA TAXA DE ENTREGA — REGRA INVIOLÁVEL: você NUNCA escreve um valor de taxa de entrega que não tenha vindo, nesta conversa, no campo "delivery_fee" retornado por update_order_draft. É PROIBIDO estimar, chutar, arredondar, repetir valor de uma conversa antiga, deduzir por bairro/distância ou dizer "deve ficar em torno de R$ X". Quando o endereço completo é informado, o sistema abre uma janela de até 30 segundos para a loja manter ou editar o valor da entrega. O valor liberado pelo popup passa a ser a fonte de verdade e deve ser salvo no rascunho. Se a taxa já estiver salva/informada para o MESMO endereço, NÃO peça novo cálculo e NÃO gere outro popup. Enquanto esse campo não voltar com um número, apenas diga que vai confirmar o valor exato.
+- 🚨 VALOR DA TAXA DE ENTREGA — REGRA INVIOLÁVEL: você NUNCA escreve um valor de taxa de entrega que não tenha vindo, nesta conversa, no campo "delivery_fee" retornado por update_order_draft. É PROIBIDO estimar, chutar, arredondar, repetir valor de uma conversa antiga, deduzir por bairro/distância ou dizer "deve ficar em torno de R$ X". Enquanto esse campo não voltar com um número, a única resposta permitida sobre frete é dizer que vai confirmar o valor exato da entrega para aquele endereço. Cada valor informado passa por uma conferência da loja antes de ser liberado — mandar um valor por conta própria antes disso é o erro mais grave possível.
 - 🚨 TAXA DE ENTREGA: sempre que update_order_draft retornar "delivery_fee" (ou o valor aparecer em "o que já sei acima"), sua PRÓXIMA mensagem OBRIGATORIAMENTE informa esse valor ao cliente, de forma direta ("A taxa de entrega para esse endereço é R$ X,XX."), e já segue para o próximo passo do pedido. Nunca continue o atendimento sem ter informado a taxa. Use exatamente o valor retornado, sem arredondar nem estimar.
 - Estilo: direto, profissional e natural. Sem gírias, sem rodeios, sem enrolação, sem frases decorativas. Uma resposta objetiva por vez, só com o que foi pedido ou o que falta para fechar o pedido.
 - Se o endereço estiver marcado como fora da área de entrega, NÃO diga simplesmente que a loja não entrega nessa região — siga o fluxo de REDIRECIONAMENTO FORA DE ÁREA (iFood/99Food) descrito mais abaixo, e não finalize o pedido.
@@ -1175,7 +1156,7 @@ Regras importantes:
 - Se finalize_order retornar "status: stock_check_failed", não finalize; diga que precisa confirmar a disponibilidade com a equipe e faça handoff humano.
 - Se finalize_order retornar "status: unmatched_products", o nome de algum item não bateu com nada do cardápio real — nunca finalize com um item assim. A resposta já vem com "suggestions": pra cada item não reconhecido, uma lista "closest" com os nomes REAIS do cardápio mais parecidos. Ofereça EXATAMENTE essas opções ao cliente (ex: "Você quis dizer 'Nome real 1' ou 'Nome real 2'?"), nunca liste o cardápio inteiro de novo. Só depois que o cliente confirmar, chame update_order_draft de novo com o nome EXATO de uma das opções de "closest", e então tente finalize_order novamente.
 - Se finalize_order retornar "status: handoff_human", pare de tentar sozinha: avise o cliente, de forma natural e tranquila, que um atendente vai continuar o atendimento a partir daqui, e não chame mais nenhuma ferramenta nessa conversa.
-- Se update_order_draft retornar "status: address_incomplete", NÃO tente calcular nem falar taxa. Peça de forma educada somente os campos realmente listados em "missing". O bairro validado no início NÃO deve aparecer como faltante nem ser solicitado outra vez. Exemplo: se já existe bairro e falta somente número, pergunte apenas: "Para eu verificar a taxa de entrega certinho, poderia me informar o número, por favor?" Nunca abra assunto de pagamento enquanto o endereço estiver incompleto.
+- Se update_order_draft retornar "status: address_incomplete", NÃO tente calcular nem falar taxa. Peça de forma educada somente os campos listados em "missing" (rua, número e/ou bairro). Exemplo: "Para eu verificar a taxa de entrega certinho, poderia me informar o número, por favor?" Nunca abra assunto de pagamento enquanto o endereço estiver incompleto.
 - Se finalize_order retornar "status: delivery_fee_unavailable", o sistema não conseguiu calcular a taxa de entrega ainda — peça desculpas, diga que está com uma instabilidade rápida no cálculo do frete, e peça pra confirmar o endereço de novo (rua, número, bairro) pra tentar de novo.
 
 🏪 CLIENTE CITOU UM ESTABELECIMENTO OU PONTO DE REFERÊNCIA EM VEZ DE ENDEREÇO ("entregam no mercado tal?", "perto do posto X", "no condomínio Y"): NUNCA responda que não entrega sem antes chamar a ferramenta lookup_place_address com o nome do lugar. Ela descobre o endereço real, o bairro, e já retorna no campo "atendido" a decisão FINAL sobre se a loja entrega ali (true = entrega, false = não entrega, null = sem lista cadastrada, aí siga as INSTRUÇÕES DO GERENTE). Quando "atendido" vier true ou false, é DEFINITIVO — nunca conteste, reavalie ou compare de novo com a grafia exata do bairro, mesmo que o nome escrito pelo cliente tenha vindo com pequena diferença de acento/letra. Se a ferramenta não achar o lugar ou não identificar o bairro, peça o bairro/rua ao cliente — nunca afirme que não atende.
@@ -1284,11 +1265,18 @@ function isBairroAtendido(neighborhood: string | null | undefined, bairrosAtendi
 }
 
 // ============================================================
-// BAIRROS NÃO ATENDIDOS e RUAS NÃO ATENDIDAS — listas negativas.
-// REGRA DE PRIORIDADE: enquanto existir uma lista POSITIVA de bairros ativos,
-// qualquer bairro que conste nela é atendido e vence eventual duplicidade na
-// lista negativa. Ruas explicitamente bloqueadas continuam podendo ser tratadas
-// como exceção operacional.
+// BAIRROS NÃO ATENDIDOS e RUAS NÃO ATENDIDAS — listas negativas
+// explícitas (CRUD em Configurações → Bairros não atendidos / Ruas não
+// atendidas). Diferente de "bairros_atendidos" (lista positiva, só entra em
+// vigor quando tem pelo menos 1 item ativo), estas duas são um bloqueio
+// direto: qualquer bairro ou rua cadastrado aqui NUNCA é considerado
+// atendido, mesmo que:
+//  - esteja também na lista de bairros atendidos (erro de cadastro);
+//  - o cálculo por distância/km diga que está dentro do raio;
+//  - as "Instruções para a IA" (texto livre) sugiram o contrário.
+// Isso existe pra cobrir o caso de bairro/rua que fica geograficamente
+// dentro da área normal de entrega, mas que a loja decidiu não atender por
+// algum motivo específico (ex: histórico de problema na região).
 function isBairroNaoAtendido(neighborhood: string | null | undefined, bairrosNaoAtendidos: string[]): boolean {
   if (!bairrosNaoAtendidos.length) return false;
   return !!findConfiguredBairroMatch(neighborhood, bairrosNaoAtendidos);
@@ -1333,9 +1321,11 @@ function resolveBairroStatus(
 /**
  * Aplica as listas de bairros/ruas atendidos e não atendidos sobre o
  * resultado do cálculo de frete.
- * - Rua explicitamente marcada como NÃO atendida continua sendo exceção de
- *   endereço. Para BAIRRO, a lista positiva ativa é soberana: se o bairro está
- *   ativo, ele é atendido mesmo que exista duplicado na lista negativa.
+ * - Bairro ou rua estão marcados como NÃO atendidos → `outOfArea = true`
+ *   SEMPRE, é a checagem de maior prioridade de todas (roda antes de
+ *   qualquer outra regra, inclusive antes da lista positiva de bairros
+ *   atendidos — um cadastro de bloqueio nunca pode ser "vencido" por outra
+ *   fonte).
  * - Sem bloqueio e lista de bairros atendidos vazia: não mexe em nada,
  *   mantém o comportamento anterior (só o cálculo por distância decide).
  * - Sem bloqueio e bairro do cliente ESTÁ na lista de atendidos: força
@@ -1394,7 +1384,7 @@ function normalizePaymentTiming(v: any): "now" | "delivery" | null {
 }
 
 const PAYMENT_QUESTION_TEXT =
-  "Qual será a forma de pagamento, por favor? Aceitamos Pix ou cartão (crédito ou débito). Não recebemos dinheiro em espécie, para segurança do entregador.";
+  "Qual será a forma de pagamento? Aceitamos cartões de crédito e débito ou Pix para pagamento agora ou na entrega via QR Code. Não recebemos dinheiro em espécie, para segurança do entregador.";
 
 type DeterministicPaymentPatch = {
   payment_method?: "pix" | "card";
@@ -1429,15 +1419,13 @@ function inferPaymentFromCustomerTurn(
     return {
       payment_method: "pix",
       card_type: null,
-      // Se o cliente disser espontaneamente "Pix agora", respeita. Caso apenas
-      // diga "Pix", não fazemos uma segunda pergunta: registramos como Pix na
-      // entrega via QR Code e seguimos o fluxo.
-      payment_timing: saysNow ? "now" : "delivery",
+      ...(saysNow ? { payment_timing: "now" as const } : {}),
+      ...(saysDelivery ? { payment_timing: "delivery" as const } : {}),
     };
   }
-  // Crédito/débito continuam sendo aceitos, mas operacionalmente o pedido
-  // registra somente "cartão". Nunca fazemos uma pergunta extra ao cliente.
-  if (hasCredit || hasDebit || hasCard) return { payment_method: "card", card_type: null, payment_timing: "delivery" };
+  if (hasCredit) return { payment_method: "card", card_type: "credit", payment_timing: "delivery" };
+  if (hasDebit) return { payment_method: "card", card_type: "debit", payment_timing: "delivery" };
+  if (hasCard) return { payment_method: "card", payment_timing: "delivery" };
 
   // Respostas curtas como "entrega" ou "agora" só ganham significado de Pix
   // quando a pergunta imediatamente anterior era explicitamente sobre o momento do Pix
@@ -1585,29 +1573,6 @@ function greetingByTimeBR(): "Bom dia" | "Boa tarde" | "Boa noite" {
 function isExplicitMenuRequest(text: string): boolean {
   const t = normalizeStreet(text);
   return /\b(cardapio|menu|foto do cardapio|manda o cardapio|envia o cardapio|reenviar o cardapio|manda de novo)\b/.test(t);
-}
-
-// Resposta positiva ESPECÍFICA para a pergunta "Gostaria de ver nosso cardápio?".
-// Não reutilizamos a confirmação final do pedido aqui, porque são intenções
-// diferentes. Ex.: "pode mandar" aceita o cardápio; "quero uma costela"
-// deve seguir como pedido do produto, e não ser convertido em envio de menu.
-function isPositiveMenuReply(text: string): boolean {
-  const t = normalizeStreet(text)
-    .replace(/[.,;:!?]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!t) return false;
-
-  const negative = /\b(?:nao|agora nao|dispenso|deixa|depois|nao precisa)\b/;
-  if (negative.test(t)) return false;
-
-  const positive = [
-    /^sim(?:\s+(?:por favor|pode|quero|manda|envia))?$/,
-    /^(?:claro|com certeza|pode ser|quero ver|quero o cardapio|pode mandar|pode enviar|manda|manda ai|envia|envia ai|por favor)$/,
-    /^(?:sim )?(?:manda|envia)(?: o| esse| esse ai)? cardapio$/,
-    /^(?:sim )?(?:quero|gostaria de ver)(?: o| esse)? cardapio$/,
-  ];
-  return positive.some((re) => re.test(t));
 }
 
 function looksLikePickupIntent(text: string): boolean {
@@ -1759,16 +1724,6 @@ function isExplicitNegative(text: string): boolean {
   return ["nao", "não", "nao e", "não é", "errado", "outro", "outro bairro"].includes(t);
 }
 
-function isBeverageDecline(text: string): boolean {
-  const t = normalizeStreet(text).replace(/[.!?]/g, "").trim();
-  return /^(nao|não|nao obrigado|não obrigado|nao obrigada|não obrigada|sem bebida|sem refrigerante|so isso|só isso|pode fechar|pode seguir)$/.test(t);
-}
-
-function isBeverageOfferMessage(text: string): boolean {
-  const t = normalizeStreet(text);
-  return /(algo pra beber|algo para beber|alguma bebida|gostaria de acrescentar algo para beber|quer.*bebida|quer.*refrigerante)/.test(t);
-}
-
 type SpecialNeighborhoodDecision = "allow" | "redirect" | "ask" | null;
 
 function specialNeighborhoodDecision(neighborhood: string, text: string): SpecialNeighborhoodDecision {
@@ -1870,21 +1825,6 @@ async function executeTool(
       draft.address_street?.trim() && draft.address_number?.trim() && draft.address_neighborhood?.trim(),
     );
 
-    // O bairro validado no início da conversa faz parte do pedido atual.
-    // Quando o cliente depois informa apenas rua + número, NUNCA apagamos nem
-    // voltamos a pedir o bairro já confirmado. Só substituímos o bairro quando
-    // o cliente realmente informa outro nome de bairro/localidade.
-    const validatedNeighborhoodAlreadySaved = draft.address_neighborhood
-      ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos) || draft.address_neighborhood
-      : null;
-    if (
-      args.address_neighborhood !== undefined &&
-      (args.address_neighborhood == null || String(args.address_neighborhood).trim() === "") &&
-      validatedNeighborhoodAlreadySaved
-    ) {
-      delete args.address_neighborhood;
-    }
-
     for (const k of [
       "customer_name",
       "delivery_mode",
@@ -1933,7 +1873,7 @@ async function executeTool(
     // recalcular e reabrir o popup de aprovação por causa de diferenças
     // triviais de digitação/maiúsculas entre uma chamada e outra do mesmo
     // endereço já aprovado.
-    const normalizeAddr = (s: string) => normalizeStreet(s).replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+    const normalizeAddr = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
     const addressIsComplete = Boolean(
       draft.address_street?.trim() && draft.address_number?.trim() && draft.address_neighborhood?.trim(),
     );
@@ -2012,7 +1952,7 @@ async function executeTool(
               fee: Number(result.fee),
               distanceKm: result.distanceKm ?? null,
             });
-            if (outcome.status === "rejected") {
+            if (outcome === "rejected") {
               await supabaseAdmin.from("whatsapp_conversations").update({ bot_paused: true }).eq("id", conversation.id);
               if (ctx.flags) ctx.flags.silenced = true;
               return {
@@ -2022,7 +1962,6 @@ async function executeTool(
                 },
               };
             }
-            if (outcome.fee != null) result.fee = Number(outcome.fee);
           }
           draft.estimated_delivery_fee = result.fee;
           draft.estimated_distance_km = result.distanceKm;
@@ -2063,55 +2002,6 @@ async function executeTool(
 
     patch.updated_at = new Date().toISOString();
     await supabaseAdmin.from("order_drafts").update(patch).eq("conversation_id", conversation.id);
-
-    // Se esta atualização aconteceu depois da oferta de bebida e agora todos
-    // os dados estão completos, o BACKEND envia o resumo imediatamente. Isso
-    // evita depender de a IA lembrar de chamar finalize_order depois de adicionar
-    // a bebida — exatamente o caso que deixava a conversa parada após o Guaraná.
-    if (!ctx.finalConfirmationAllowed) {
-      const { data: recentFlow } = await supabaseAdmin
-        .from("whatsapp_messages")
-        .select("direction,body,created_at")
-        .eq("conversation_id", conversation.id)
-        .not("body", "is", null)
-        .order("created_at", { ascending: false })
-        .limit(16);
-      const flowChronological = (recentFlow ?? []).reverse();
-      let lastDrinkOffer = -1;
-      for (let i = 0; i < flowChronological.length; i++) {
-        const m: any = flowChronological[i];
-        if (m.direction === "out" && isBeverageOfferMessage(String(m.body ?? ""))) lastDrinkOffer = i;
-      }
-      const drinkOfferAnswered =
-        lastDrinkOffer >= 0 && flowChronological.slice(lastDrinkOffer + 1).some((m: any) => m.direction === "in");
-      const structurallyComplete =
-        Boolean(draft.customer_name && draft.delivery_mode && draft.items?.length && draft.payment_method) &&
-        (draft.delivery_mode === "pickup" ||
-          Boolean(draft.address_street && draft.address_number && draft.address_neighborhood && draft.estimated_delivery_fee != null));
-
-      if (drinkOfferAnswered && structurallyComplete) {
-        const finalSummary = await buildFinalConfirmationSummary(supabaseAdmin, draft);
-        if (!finalSummary.unmatched.length) {
-          draft.awaiting_final_confirmation = true;
-          await supabaseAdmin
-            .from("order_drafts")
-            .update({ awaiting_final_confirmation: true, updated_at: new Date().toISOString() })
-            .eq("conversation_id", conversation.id);
-          await replyAndLog(supabaseAdmin, conversation.id, conversation.phone, finalSummary.text, { systemMessage: true });
-          if (ctx.flags) ctx.flags.silenced = true;
-          return {
-            result: {
-              status: "final_confirmation_summary_sent",
-              subtotal: finalSummary.subtotal,
-              delivery_fee: finalSummary.deliveryFee,
-              total: finalSummary.total,
-              instruction: "Resumo oficial enviado pelo backend. Aguarde somente a confirmação do cliente.",
-            },
-          };
-        }
-      }
-    }
-
     // Devolve a taxa calculada junto do resultado: sem isso a IA não sabia o
     // valor liberado e seguia a conversa sem informar o frete ao cliente.
     return {
@@ -2136,25 +2026,21 @@ async function executeTool(
       .from("order_drafts")
       .update({
         payment_method: draft.payment_method,
-        card_type: null,
+        card_type: draft.payment_method === "card" ? (draft.card_type ?? null) : null,
         payment_timing: draft.payment_timing,
         updated_at: new Date().toISOString(),
       })
       .eq("conversation_id", conversation.id);
 
-    // Nenhum meio de pagamento exige uma segunda pergunta. Se o cliente disser
-    // apenas Pix ou cartão, o sistema registra o pagamento para a entrega. Se ele
-    // disser espontaneamente "Pix agora", esse momento já terá sido persistido.
-    if (draft.payment_method && !draft.payment_timing) {
+    // Cartão é pago na entrega na prática (maquininha) — não faz sentido travar o pedido esperando a IA
+    // perguntar isso pro cliente. Só o Pix realmente precisa dessa resposta
+    // (pra saber se manda o código agora ou só na entrega).
+    if (draft.payment_method && draft.payment_method !== "pix" && !draft.payment_timing) {
       draft.payment_timing = "delivery";
       await supabaseAdmin
         .from("order_drafts")
         .update({ payment_timing: "delivery", updated_at: new Date().toISOString() })
         .eq("conversation_id", conversation.id);
-    }
-    if (draft.payment_method === "card" && draft.card_type) {
-      draft.card_type = null;
-      await supabaseAdmin.from("order_drafts").update({ card_type: null }).eq("conversation_id", conversation.id);
     }
 
     const isPickup = draft.delivery_mode === "pickup";
@@ -2176,7 +2062,8 @@ async function executeTool(
     }
     if (!draft.items?.length) missing.push("itens do pedido");
     if (!draft.payment_method) missing.push("forma de pagamento");
-
+    if (draft.payment_method === "card" && !draft.card_type) missing.push("se o cartão é crédito ou débito");
+    if (draft.payment_method === "pix" && !draft.payment_timing) missing.push("se paga o Pix agora ou na entrega");
     if (missing.length) {
       // Nunca cria estado de confirmação final com dados incompletos. Esse era o
       // defeito que gerava: resumo -> sim -> pergunta pagamento -> resumo -> sim.
@@ -2185,100 +2072,30 @@ async function executeTool(
         .from("order_drafts")
         .update({ awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
         .eq("conversation_id", conversation.id);
-      const paymentOnly = missing.every((m) => m === "forma de pagamento");
+      const paymentOnly = missing.every((m) =>
+        ["forma de pagamento", "se o cartão é crédito ou débito", "se paga o Pix agora ou na entrega"].includes(m),
+      );
       return {
         result: {
           status: "missing_fields",
           missing,
           instruction: paymentOnly
-            ? `Pergunte exatamente: "${PAYMENT_QUESTION_TEXT}" Não mostre resumo e não peça confirmação ainda.`
-            : "Peça somente os campos listados em missing. Para endereço de entrega, pergunte: 'Qual seria o endereço de entrega, por favor?'. Não use endereço histórico e não mostre resumo ainda.",
+            ? draft.payment_method === "pix"
+              ? "Pergunte somente se o cliente prefere pagar o Pix agora ou na entrega via QR Code. Não mostre resumo e não peça confirmação ainda."
+              : draft.payment_method === "card" && !draft.card_type
+                ? "Pergunte somente se o cartão será crédito ou débito. Não mostre resumo e não peça confirmação ainda."
+                : `Pergunte exatamente: "${PAYMENT_QUESTION_TEXT}" Não mostre resumo e não peça confirmação ainda.`
+            : "Peça somente os campos listados em missing. Não mostre resumo e não peça confirmação ainda.",
         },
       };
     }
     if (!isPickup && draft.out_of_delivery_area) return { result: { status: "out_of_delivery_area" } };
-
-    // ============ OFERTA DETERMINÍSTICA DE BEBIDA ANTES DO RESUMO ============
-    // Se o pedido ainda não possui bebida, o backend oferece UMA VEZ as bebidas
-    // ativas e aguarda uma resposta do cliente. Só depois dessa resposta o fluxo
-    // pode seguir para o resumo final. Isso não fica dependente da decisão da IA.
-    if (!ctx.finalConfirmationAllowed) {
-      const { data: beverageProducts } = await supabaseAdmin
-        .from("products")
-        .select("id,name,category,sale_price,promotion_active,promotion_price,promotion_type,promotion_start_at,promotion_end_at,promotion_days_of_week,promotion_time_start,promotion_time_end,promotion_label")
-        .eq("active", true)
-        .order("name");
-      const drinks = (beverageProducts ?? []).filter((p: any) => {
-        const hay = normalizeStreet(`${p.category ?? ""} ${p.name ?? ""}`);
-        return /\b(bebida|bebidas|refrigerante|refrigerantes|guarana|coca|agua|suco)\b/.test(hay);
-      });
-      const draftHasDrink = (draft.items ?? []).some((item) => {
-        const itemName = normalizeStreet(item.product_name);
-        return drinks.some((drink: any) => {
-          const drinkName = normalizeStreet(drink.name);
-          return itemName === drinkName || itemName.includes(drinkName) || drinkName.includes(itemName);
-        });
-      });
-
-      if (!draftHasDrink && drinks.length) {
-        const { data: recentForDrinkOffer } = await supabaseAdmin
-          .from("whatsapp_messages")
-          .select("direction,body,created_at")
-          .eq("conversation_id", conversation.id)
-          .not("body", "is", null)
-          .order("created_at", { ascending: false })
-          .limit(24);
-        const chronological = (recentForDrinkOffer ?? []).reverse();
-        let lastOfferIndex = -1;
-        for (let i = 0; i < chronological.length; i++) {
-          const m: any = chronological[i];
-          if (m.direction !== "out") continue;
-          const body = normalizeStreet(m.body ?? "");
-          if (/(algo pra beber|algo para beber|alguma bebida|gostaria de.*bebida|quer.*bebida|quer.*refrigerante)/.test(body)) {
-            lastOfferIndex = i;
-          }
-        }
-        const customerAnsweredOffer =
-          lastOfferIndex >= 0 && chronological.slice(lastOfferIndex + 1).some((m: any) => m.direction === "in");
-
-        if (!customerAnsweredOffer) {
-          const options = drinks
-            .slice(0, 8)
-            .map((p: any) => `${p.name} — ${brl(getEffectivePrice(p).price)}`)
-            .join("; ");
-          await replyAndLog(
-            supabaseAdmin,
-            conversation.id,
-            conversation.phone,
-            `Antes de fechar, gostaria de acrescentar algo para beber? Temos: ${options}.`,
-            { systemMessage: true },
-          );
-          if (ctx.flags) ctx.flags.silenced = true;
-          return {
-            result: {
-              status: "beverage_offer_sent",
-              instruction: "A oferta de bebida já foi enviada pelo backend. Aguarde a resposta do cliente antes de mostrar o resumo ou finalizar.",
-            },
-          };
-        }
-      }
-    }
 
     // Só depois de TODOS os dados obrigatórios estarem completos o sistema pode
     // entrar no estado de confirmação final. O RESUMO É ENVIADO PELO BACKEND,
     // não pela IA: isso garante que subtotal, taxa e TOTAL A PAGAR sempre
     // aparecem e impede o modelo de repetir/alterar o texto do resumo.
     if (!ctx.finalConfirmationAllowed) {
-      // Se o resumo já foi enviado e nada foi alterado, NÃO envia novamente.
-      // Apenas aguarda a confirmação do cliente.
-      if (draft.awaiting_final_confirmation) {
-        return {
-          result: {
-            status: "awaiting_final_confirmation",
-            instruction: "O resumo já foi enviado. Não repita o resumo; aguarde apenas a confirmação do cliente.",
-          },
-        };
-      }
       const finalSummary = await buildFinalConfirmationSummary(supabaseAdmin, draft);
       if (finalSummary.unmatched.length) {
         return {
@@ -2526,7 +2343,7 @@ async function executeTool(
       draft.payment_method === "pix" && draft.payment_timing === "now" ? "awaiting_payment" : "pending";
 
     // payment_timing para cartão sempre é 'delivery' (nunca é 'now')
-    const resolvedPaymentTiming = draft.payment_timing ?? "delivery";
+    const resolvedPaymentTiming = draft.payment_timing ?? (draft.payment_method !== "pix" ? "delivery" : null);
 
     const orderPayload = {
       source: "whatsapp",
@@ -2542,7 +2359,7 @@ async function executeTool(
       address_reference: isPickup ? null : (draft.address_reference ?? null),
       notes: draft.notes ?? null,
       payment_method: draft.payment_method,
-      card_type: null,
+      card_type: draft.payment_method === "card" ? (draft.card_type ?? null) : null,
       payment_timing: resolvedPaymentTiming,
       payment_status: paymentStatus,
       change_for: null,
@@ -2554,18 +2371,10 @@ async function executeTool(
       status: initialStatus,
     };
 
-    // O cliente já confirmou o resumo. Agora seguimos exatamente a ordem
-    // comercial definida pela loja: 1) informar o prazo; 2) criar o pedido
-    // automaticamente NA MESMA RODADA, sem pedir ou aguardar nova aprovação.
-    if (!isPickup) {
-      await replyAndLog(
-        supabaseAdmin,
-        conversation.id,
-        conversation.phone,
-        "Perfeito! O prazo de entrega é de até 40 minutos, porém a maioria das nossas entregas acontece bem antes desse prazo. Acompanhe as atualizações por aqui no WhatsApp, pois vamos avisando cada etapa do seu pedido.",
-        { systemMessage: true },
-      );
-    }
+    // O pedido é gravado na MESMA rodada da primeira confirmação do cliente.
+    // Primeiro garantimos a persistência no banco; em seguida enviamos o aviso
+    // de até 40 minutos. Assim nunca mostramos "vou gerar" e depois deixamos o
+    // cliente sem pedido caso haja uma falha de banco.
 
     // Caminho principal: pedido + itens são gravados numa única transação no
     // banco. Se qualquer item falhar, o pedido inteiro é revertido.
@@ -2607,6 +2416,19 @@ async function executeTool(
       };
     }
 
+    // Pedido criado com sucesso: agora informa o prazo. Não pede e não aguarda
+    // nenhuma nova aprovação. A criação já aconteceu automaticamente nesta
+    // mesma rodada da confirmação final.
+    if (!isPickup) {
+      await replyAndLog(
+        supabaseAdmin,
+        conversation.id,
+        conversation.phone,
+        "Perfeito! O prazo de entrega é de até 40 minutos, porém a maioria das nossas entregas acontece bem antes desse prazo. Acompanhe as atualizações por aqui no WhatsApp, pois vamos avisando cada etapa do seu pedido.",
+        { systemMessage: true },
+      );
+    }
+
     // captura antes de limpar o rascunho (precisamos disso pra decidir se manda o bloco do Pix)
     const finishedPaymentMethod = draft.payment_method;
     const finishedPaymentTiming = draft.payment_timing;
@@ -2620,12 +2442,6 @@ async function executeTool(
       .from("order_drafts")
       .update({
         customer_name: null,
-        address_street: null,
-        address_number: null,
-        address_complement: null,
-        address_reference: null,
-        estimated_delivery_fee: null,
-        estimated_distance_km: null,
         items: [],
         payment_method: null,
         card_type: null,
@@ -2638,12 +2454,6 @@ async function executeTool(
       })
       .eq("conversation_id", conversation.id);
     draft.customer_name = null;
-    draft.address_street = null;
-    draft.address_number = null;
-    draft.address_complement = null;
-    draft.address_reference = null;
-    draft.estimated_delivery_fee = null;
-    draft.estimated_distance_km = null;
     draft.failed_finalize_attempts = 0;
     draft.awaiting_final_confirmation = false;
     draft.items = [];
@@ -2687,8 +2497,8 @@ async function executeTool(
       finishedPaymentMethod === "pix" ? "Pix" : "Cartão";
     const paymentLine =
       finishedPaymentMethod === "pix"
-        ? `💳 Pagamento: *Pix*${finishedPaymentTiming === "now" ? " (pago agora)" : ""}`
-        : `💳 Pagamento: *Cartão*`;
+        ? `💳 Pagamento: *Pix* (${finishedPaymentTiming === "now" ? "pago agora" : "na entrega"})`
+        : `💳 Pagamento: *Cartão na entrega* (crédito à vista ou débito)`;
 
     // mensagem de status diferente para retirada vs entrega, e para direto na prateleira vs. preparo
     const closingLine = isPickup
@@ -3048,14 +2858,17 @@ function buildBairrosAtendidosText(bairrosAtendidosText: string | null): string 
   return `\n📍 BAIRROS ATENDIDOS — LISTA OFICIAL CADASTRADA PELA LOJA (fonte de verdade sobre área de entrega, mais confiável que qualquer cálculo por distância): ${bairrosAtendidosText}\nO sistema já confere automaticamente o bairro informado pelo cliente contra essa lista antes de calcular a taxa — se o bairro estiver aqui, o pedido NUNCA será marcado como fora de área, mesmo que o cálculo por km diga o contrário. Se "O QUE JÁ SEI SOBRE O PEDIDO" indicar endereço fora da área mesmo assim, confira se o bairro dito pelo cliente bate com um destes antes de recusar — pode ser erro de digitação ou de grafia (ex: acento, abreviação). Fora dessa lista, siga o fluxo de REDIRECIONAMENTO FORA DE ÁREA (iFood/99Food) descrito no prompt.\n`;
 }
 
-// 🚫 BAIRROS/RUAS NÃO ATENDIDOS — listas negativas explícitas cadastradas.
-// REGRA DE PRECEDÊNCIA: a lista POSITIVA de bairros ativos é soberana para
-// bairro. A lista negativa só pode decidir quando o bairro NÃO estiver ativo
-// em `bairros_atendidos`. Ruas explicitamente bloqueadas continuam sendo uma
-// exceção operacional por endereço.
+// 🚫 BAIRROS/RUAS NÃO ATENDIDOS — listas negativas explícitas cadastradas
+// pela loja. Têm prioridade MÁXIMA: valem mais até do que a lista de
+// bairros atendidos e do que qualquer instrução solta no texto livre do
+// gerente. O sistema já bloqueia essas áreas em código (applyBairroOverride)
+// antes mesmo da IA responder — este texto é uma segunda camada de
+// segurança, pra IA nunca afirmar o contrário em texto livre (ex: quando o
+// cliente só pergunta "vocês entregam aí?" sem chegar a informar endereço
+// completo, ou cita um bairro/rua sem ainda ter passado por update_order_draft).
 function buildBairrosNaoAtendidosText(bairrosNaoAtendidosText: string | null): string {
   if (!bairrosNaoAtendidosText) return "";
-  return `\n🚫 BAIRROS NÃO ATENDIDOS — LISTA AUXILIAR: ${bairrosNaoAtendidosText}\nIMPORTANTE: esta lista NÃO pode sobrescrever a lista positiva de bairros ATIVOS. Se um bairro estiver ativo em Bairros atendidos, ele é atendido pelo WhatsApp mesmo que exista aqui por engano/duplicidade. Use esta lista somente quando NÃO houver correspondência com nenhum bairro ativo.\n`;
+  return `\n🚫 BAIRROS NÃO ATENDIDOS — LISTA OFICIAL CADASTRADA PELA LOJA (bloqueio definitivo, prioridade máxima sobre QUALQUER outra informação deste prompt, inclusive sobre a lista de bairros atendidos e sobre as instruções do gerente): ${bairrosNaoAtendidosText}\nSe o bairro citado ou informado pelo cliente estiver nesta lista (mesmo com pequena diferença de grafia/acento), o entregador fixo da loja NUNCA vai até esse bairro — nunca diga que entrega por WhatsApp, nunca diga "vou verificar", nunca peça o restante do endereço pra "confirmar depois". Mas NÃO diga simplesmente que a loja não entrega ali: siga o fluxo de REDIRECIONAMENTO FORA DE ÁREA (iFood/99Food) descrito no prompt.\n`;
 }
 
 function buildRuasNaoAtendidasText(ruasNaoAtendidasText: string | null): string {
@@ -3177,35 +2990,6 @@ async function runConversationalTurn(opts: {
   })();
   const lastUserText = lastUserIndex >= 0 ? (opts.history[lastUserIndex]?.content ?? "") : "";
 
-  // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
-  // disser que não quer bebida, o backend gera imediatamente o resumo oficial
-  // com TOTAL e pede a única confirmação final.
-  const previousAssistantText = lastUserIndex > 0
-    ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
-    : "";
-  if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
-    const directSummary = await executeTool("finalize_order", {}, {
-      supabaseAdmin: opts.supabaseAdmin,
-      conversation: opts.conversation,
-      draft: opts.draft,
-      flags,
-      finalConfirmationAllowed: false,
-      bairrosAtendidos: opts.bairrosAtendidos,
-      bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
-      ruasNaoAtendidas: opts.ruasNaoAtendidas,
-    });
-    if (flags.silenced || directSummary.result?.status === "final_confirmation_summary_sent") {
-      return {
-        silenced: true,
-        finalText: "",
-        pixBlock: null,
-        pixKeyLabel: null,
-        pixKeyMessage: null,
-        sendMenuImage: false,
-      };
-    }
-  }
-
   // A confirmação final não depende mais de uma frase exata da IA. Procura a
   // última mensagem real do atendente imediatamente antes da resposta atual,
   // ignorando eventuais mensagens internas/ferramentas que possam ter entrado
@@ -3226,37 +3010,9 @@ async function runConversationalTurn(opts: {
       if (msg?.role === "user") break;
     }
   }
-  // O resumo oficial é salvo como mensagem de sistema e pode ficar fora do
-  // histórico reduzido que a IA recebe. Por isso a confirmação final também
-  // consulta o histórico REAL do banco. Isso impede o loop em que o cliente
-  // diz "sim", o backend não enxerga o resumo e a IA manda o mesmo resumo de novo.
-  let recentOfficialSummaryInDb = false;
-  if (isExplicitOrderConfirmation(lastUserText)) {
-    try {
-      const { data: recentOut } = await opts.supabaseAdmin
-        .from("whatsapp_messages")
-        .select("body,direction,created_at")
-        .eq("conversation_id", opts.conversation.id)
-        .eq("direction", "out")
-        .not("body", "is", null)
-        .order("created_at", { ascending: false })
-        .limit(8);
-      recentOfficialSummaryInDb = (recentOut ?? []).some((m: any) => {
-        const body = String(m?.body ?? "");
-        return /resumo do (?:seu )?pedido/i.test(body) &&
-          /total a pagar/i.test(body) &&
-          /(posso fechar o pedido|est[aá] tudo certo|pode fechar)/i.test(body);
-      });
-    } catch (err) {
-      console.error("[final-confirmation] falha ao consultar resumo recente:", err);
-    }
-  }
-
   const finalConfirmationAllowed =
     isExplicitOrderConfirmation(lastUserText) &&
-    (Boolean(opts.draft.awaiting_final_confirmation) ||
-      previousAssistantRequestedConfirmation ||
-      recentOfficialSummaryInDb);
+    (Boolean(opts.draft.awaiting_final_confirmation) || previousAssistantRequestedConfirmation);
 
   // Caminho determinístico: se o cliente acabou de confirmar explicitamente o
   // resumo, o backend fecha o pedido antes de consultar a IA. Assim o modelo
@@ -3266,31 +3022,24 @@ async function runConversationalTurn(opts: {
     // apenas uma execução pode consumir awaiting_final_confirmation=true.
     // Se a Evolution reenviar o mesmo evento ou dois workers processarem o
     // mesmo "sim" ao mesmo tempo, o segundo é silenciado e NÃO repete resumo.
-    // Se a flag ainda está true, fazemos o claim atômico para proteger contra
-    // webhook duplicado. Se a flag já foi perdida, mas acabamos de comprovar
-    // pelo histórico real que um resumo oficial foi enviado, NÃO descartamos
-    // a confirmação: seguimos para finalize_order. Esse era um dos motivos do
-    // "sim" ser consumido sem fechar o pedido.
-    if (opts.draft.awaiting_final_confirmation) {
-      const { data: claimedConfirmation, error: claimError } = await opts.supabaseAdmin
-        .from("order_drafts")
-        .update({ awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
-        .eq("conversation_id", opts.conversation.id)
-        .eq("awaiting_final_confirmation", true)
-        .select("conversation_id")
-        .maybeSingle();
-      if (claimError) {
-        messages.push({ role: "system", content: `[falha ao reservar confirmação final] ${claimError.message}` });
-      } else if (!claimedConfirmation && !recentOfficialSummaryInDb && !previousAssistantRequestedConfirmation) {
-        return {
-          silenced: true,
-          finalText: "",
-          pixBlock: null,
-          pixKeyLabel: null,
-          pixKeyMessage: null,
-          sendMenuImage: false,
-        };
-      }
+    const { data: claimedConfirmation, error: claimError } = await opts.supabaseAdmin
+      .from("order_drafts")
+      .update({ awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
+      .eq("conversation_id", opts.conversation.id)
+      .eq("awaiting_final_confirmation", true)
+      .select("conversation_id")
+      .maybeSingle();
+    if (claimError) {
+      messages.push({ role: "system", content: `[falha ao reservar confirmação final] ${claimError.message}` });
+    } else if (!claimedConfirmation) {
+      return {
+        silenced: true,
+        finalText: "",
+        pixBlock: null,
+        pixKeyLabel: null,
+        pixKeyMessage: null,
+        sendMenuImage: false,
+      };
     }
     opts.draft.awaiting_final_confirmation = false;
 
@@ -3464,16 +3213,8 @@ async function runConversationalTurn(opts: {
   // (tool_choice: "none") pra garantir uma resposta real com o que já foi
   // apurado até aqui.
   if (!finalText) {
-    const forcedMessages = [
-      ...messages,
-      {
-        role: "system",
-        content:
-          "REGRA DE CONTINUIDADE: gere AGORA uma resposta não vazia para a última mensagem do cliente. Continue exatamente do ponto em que o atendimento parou. Se ele acabou de esclarecer uma ambiguidade, aceite a escolha/correção e peça o próximo dado que falta. Não reinicie o atendimento, não fique em silêncio e não encerre enquanto o pedido estiver em andamento.",
-      },
-    ];
     const forced = await callChatCompletion(opts.supabaseAdmin, {
-      messages: forcedMessages,
+      messages,
       tools: TOOLS,
       tool_choice: "none",
     });
@@ -3889,98 +3630,36 @@ async function handleIncomingMessageUnlocked(
     // tabela ai_instructions ainda não existe — continua sem instruções extras
   }
 
-  // Diagnóstico de conexão: a tela web normalmente usa VITE_SUPABASE_URL e
-  // este webhook usa SUPABASE_URL. Se ambas existirem no Railway e forem
-  // diferentes, Configurações e webhook estão olhando bancos distintos.
-  const serverSupabaseUrl = String(process.env.SUPABASE_URL ?? "").replace(/\/$/, "");
-  const frontendSupabaseUrl = String(process.env.VITE_SUPABASE_URL ?? "").replace(/\/$/, "");
-  const supabaseProjectMismatch = Boolean(
-    serverSupabaseUrl && frontendSupabaseUrl && serverSupabaseUrl !== frontendSupabaseUrl,
-  );
-  if (supabaseProjectMismatch) {
-    console.error(
-      "[SUPABASE_CONFIG] ERRO: SUPABASE_URL e VITE_SUPABASE_URL apontam para projetos diferentes. " +
-      "A tela e o webhook não estão lendo o mesmo banco.",
-      { serverSupabaseUrl, frontendSupabaseUrl },
-    );
-  }
-
   // carrega a lista oficial de bairros atendidos (Configurações → Bairros
   // atendidos) — quando existe pelo menos 1 bairro ativo, ela vira a fonte
   // de verdade sobre área de entrega, veja applyBairroOverride().
   let bairrosAtendidos: string[] = [];
   let bairrosAtendidosText: string | null = null;
-  let bairrosAtendidosLoadOk = false;
   try {
-    // A tela de Configurações grava exatamente `nome` e `ativo` nesta tabela.
-    // O webhook usa o MESMO schema e trata qualquer erro como falha de fonte,
-    // em vez de interpretar silenciosamente lista vazia como "todos externos".
-    const { data: bairrosRows, error: bairrosError } = await (supabaseAdmin as any)
+    const { data: bairrosRows } = await (supabaseAdmin as any)
       .from("bairros_atendidos")
-      .select("id,nome,ativo")
-      .eq("ativo", true)
-      .order("nome");
-    if (bairrosError) {
-      bairrosAtendidosLoadOk = false;
-      console.error("[BAIRROS_ATENDIDOS] Falha ao carregar lista oficial:", {
-        code: bairrosError.code,
-        message: bairrosError.message,
-      });
-    } else {
-      bairrosAtendidosLoadOk = true;
-      bairrosAtendidos = (bairrosRows ?? [])
-        .map((r: any) => String(r?.nome ?? "").trim())
-        .filter(Boolean);
-      // remove duplicados equivalentes, preservando a grafia cadastrada mais recente
-      const seen = new Set<string>();
-      bairrosAtendidos = bairrosAtendidos.filter((nome) => {
-        const key = normalizeNeighborhoodKey(nome);
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-      bairrosAtendidosText = bairrosAtendidos.length ? bairrosAtendidos.join(", ") : null;
-      console.info("[BAIRROS_ATENDIDOS] Lista oficial carregada", {
-        count: bairrosAtendidos.length,
-        bairros: bairrosAtendidos,
-      });
-      if (bairrosAtendidos.length === 0) {
-        console.warn("[BAIRROS_ATENDIDOS] A consulta foi concluída, mas nenhum bairro ATIVO foi encontrado no banco usado pelo webhook.");
-      }
-    }
-  } catch (err) {
-    console.error("[BAIRROS_ATENDIDOS] Exceção ao carregar lista oficial:", err);
-    bairrosAtendidosLoadOk = false;
+      .select("nome")
+      .eq("ativo", true);
+    bairrosAtendidos = (bairrosRows ?? []).map((r: any) => String(r.nome)).filter(Boolean);
+    bairrosAtendidosText = bairrosAtendidos.length ? bairrosAtendidos.join(", ") : null;
+  } catch {
+    // tabela bairros_atendidos ainda não existe — continua sem a lista estruturada
   }
 
-  // Em caso de mismatch conhecido entre o banco do frontend e o do backend,
-  // a lista lida aqui NÃO pode ser tratada como fonte confiável para mandar
-  // cliente para plataforma.
-  if (supabaseProjectMismatch) bairrosAtendidosLoadOk = false;
-
   // carrega a lista de BAIRROS NÃO ATENDIDOS (Configurações → Bairros não
-  // atendidos). Ela é apenas auxiliar: um bairro ATIVO em `bairros_atendidos`
-  // sempre vence eventual duplicidade nesta lista.
+  // atendidos) — bloqueio explícito, checado em código com prioridade máxima
+  // (antes até da lista de bairros atendidos), ver applyBairroOverride().
   let bairrosNaoAtendidos: string[] = [];
   let bairrosNaoAtendidosText: string | null = null;
   try {
-    const { data: bairrosNaoAtendidosRows, error: bairrosNaoError } = await (supabaseAdmin as any)
+    const { data: bairrosNaoAtendidosRows } = await (supabaseAdmin as any)
       .from("bairros_nao_atendidos")
-      .select("*");
-    if (!bairrosNaoError) {
-      bairrosNaoAtendidos = (bairrosNaoAtendidosRows ?? [])
-        .filter((r: any) => {
-          const flag = r?.ativo ?? r?.active;
-          return flag === undefined || flag === null ? true : Boolean(flag);
-        })
-        .map((r: any) => String(r?.nome ?? r?.bairro ?? r?.name ?? "").trim())
-        .filter(Boolean);
-      bairrosNaoAtendidosText = bairrosNaoAtendidos.length ? bairrosNaoAtendidos.join(", ") : null;
-    } else {
-      console.warn("[BAIRROS_NAO_ATENDIDOS] Falha ao carregar lista negativa:", bairrosNaoError);
-    }
-  } catch (err) {
-    console.warn("[BAIRROS_NAO_ATENDIDOS] Exceção ao carregar lista negativa:", err);
+      .select("nome")
+      .eq("ativo", true);
+    bairrosNaoAtendidos = (bairrosNaoAtendidosRows ?? []).map((r: any) => String(r.nome)).filter(Boolean);
+    bairrosNaoAtendidosText = bairrosNaoAtendidos.length ? bairrosNaoAtendidos.join(", ") : null;
+  } catch {
+    // tabela bairros_nao_atendidos ainda não existe — continua sem a lista estruturada
   }
 
   // carrega a lista de RUAS NÃO ATENDIDAS (Configurações → Ruas não
@@ -4033,55 +3712,6 @@ async function handleIncomingMessageUnlocked(
         : (m.body ?? ""),
     }));
 
-  // ============ RECONCILIAÇÃO DETERMINÍSTICA DO BAIRRO ============
-  // A lista POSITIVA ativa de bairros atendidos é a fonte de verdade absoluta.
-  // Se um bairro atendido já foi validado no início do atendimento, ele pertence
-  // ao pedido atual e não pode desaparecer só porque o cliente depois informou
-  // apenas rua + número. Também não permitimos que um out_of_delivery_area antigo
-  // contradiga um bairro que está ATIVO no painel.
-  let canonicalServedNeighborhood = draft.address_neighborhood
-    ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
-    : null;
-
-  // Se o rascunho perdeu o bairro, recupera SOMENTE um bairro real da lista ativa
-  // que já tenha sido informado pelo cliente anteriormente nesta conversa.
-  if (!canonicalServedNeighborhood && bairrosAtendidos.length > 0) {
-    const historicalUserMessages = history
-      .filter((m) => m.role === "user")
-      .map((m) => String(m.content ?? ""))
-      .reverse();
-    for (const oldUserText of historicalUserMessages) {
-      const recovered = findConfiguredBairroMatch(oldUserText, bairrosAtendidos);
-      if (recovered) {
-        canonicalServedNeighborhood = recovered;
-        break;
-      }
-    }
-  }
-
-  if (canonicalServedNeighborhood) {
-    const needsNeighborhoodRepair =
-      normalizeNeighborhoodKey(draft.address_neighborhood) !== normalizeNeighborhoodKey(canonicalServedNeighborhood) ||
-      draft.out_of_delivery_area === true ||
-      draft.delivery_mode !== "delivery";
-
-    draft.address_neighborhood = canonicalServedNeighborhood;
-    draft.out_of_delivery_area = false;
-    if (draft.delivery_mode !== "pickup") draft.delivery_mode = "delivery";
-
-    if (needsNeighborhoodRepair) {
-      await supabaseAdmin
-        .from("order_drafts")
-        .update({
-          address_neighborhood: canonicalServedNeighborhood,
-          out_of_delivery_area: false,
-          delivery_mode: draft.delivery_mode === "pickup" ? "pickup" : "delivery",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("conversation_id", conversation.id);
-    }
-  }
-
   // ============ CAPTURA DETERMINÍSTICA DE PAGAMENTO ============
   // Forma/momento de pagamento são dados transacionais; não dependem da memória
   // probabilística da IA. Interpreta o turno do cliente com o contexto da pergunta
@@ -4101,38 +3731,33 @@ async function handleIncomingMessageUnlocked(
   // "Gostaria de ver nosso cardápio?", uma resposta curta como "sim" NÃO pode
   // voltar para a classificação de bairro. Esse era o bug que fazia Vila São Luís
   // ser aceita e, no turno seguinte, o cliente ser redirecionado para iFood/99Food.
-  const recentAssistantMessages = history
-    .filter((m) => m.role === "assistant")
-    .map((m) => String(m.content ?? ""));
-  const previousAssistantForNeighborhood = recentAssistantMessages[recentAssistantMessages.length - 1] ?? "";
-  const recentAssistantWindow = recentAssistantMessages.slice(-3).join("\n");
-  const servedNeighborhoodAlreadyValidated = (() => {
-    const byDraft = draft.address_neighborhood
+  const previousAssistantForNeighborhood = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+  const justAcceptedServedNeighborhood =
+    /obrigado pela informa[cç][aã]o[!,. ]+.*gostaria de ver nosso card[aá]pio\?/i.test(previousAssistantForNeighborhood);
+
+  if (justAcceptedServedNeighborhood && (isExplicitOrderConfirmation(text) || isExplicitMenuRequest(text))) {
+    // Primeiro confia no bairro já persistido no rascunho. Se, por alguma razão,
+    // a gravação do turno anterior não ficou disponível ainda, recupera do histórico
+    // a última mensagem do cliente que realmente corresponda à lista ATIVA.
+    let servedNeighborhood = draft.address_neighborhood
       ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
       : null;
-    if (byDraft && draft.out_of_delivery_area !== true) return byDraft;
-    const previousUserMessages = history
-      .filter((m) => m.role === "user")
-      .map((m) => String(m.content ?? ""))
-      .reverse();
-    for (const userMessage of previousUserMessages) {
-      if (normalizeStreet(userMessage) === normalizeStreet(text)) continue;
-      const match = findConfiguredBairroMatch(userMessage, bairrosAtendidos);
-      if (match) return match;
-    }
-    return null;
-  })();
-  const justAcceptedServedNeighborhood =
-    /obrigado pela informa[cç][aã]o[!,. ]+.*gostaria de ver nosso card[aá]pio\?/i.test(previousAssistantForNeighborhood) ||
-    /gostaria de ver nosso card[aá]pio\?/i.test(recentAssistantWindow);
-  const currentTurnWantsMenuAfterServedNeighborhood =
-    !!servedNeighborhoodAlreadyValidated && (
-      isExplicitMenuRequest(text) ||
-      (isPositiveMenuReply(text) && justAcceptedServedNeighborhood)
-    );
 
-  if (currentTurnWantsMenuAfterServedNeighborhood) {
-    const servedNeighborhood = servedNeighborhoodAlreadyValidated;
+    if (!servedNeighborhood) {
+      const previousUserMessages = history
+        .filter((m) => m.role === "user")
+        .map((m) => String(m.content ?? ""))
+        .reverse();
+      for (const userMessage of previousUserMessages) {
+        if (normalizeStreet(userMessage) === normalizeStreet(text)) continue;
+        const match = findConfiguredBairroMatch(userMessage, bairrosAtendidos);
+        if (match) {
+          servedNeighborhood = match;
+          break;
+        }
+      }
+    }
+
     if (servedNeighborhood) {
       draft.delivery_mode = "delivery";
       draft.address_neighborhood = servedNeighborhood;
@@ -4157,7 +3782,7 @@ async function handleIncomingMessageUnlocked(
   // Para decisões de entrega, preço/promoção, cardápio e continuidade do pedido,
   // o bairro precisa ser validado. Bairro atendido segue pelo WhatsApp; bairro
   // externo segue pelas plataformas. Retirada não exige bairro.
-  if (bairrosAtendidosLoadOk && draft.delivery_mode !== "pickup") {
+  if (bairrosAtendidos.length > 0 && draft.delivery_mode !== "pickup") {
     if (looksLikePickupIntent(text)) {
       draft.delivery_mode = "pickup";
       draft.out_of_delivery_area = false;
@@ -4169,63 +3794,38 @@ async function handleIncomingMessageUnlocked(
       const previousAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
       const awaitingNeighborhood = /bairro/i.test(previousAssistant) && /(informe|qual|diga)/i.test(previousAssistant);
       const pendingSpecial = pendingSpecialNeighborhoodFromHistory(history);
-      // Compatibilidade com conversas antigas: se havia uma pergunta especial
-      // pendente, a lista ATIVA atual continua soberana. Se esse bairro está
-      // ativo agora, aceita imediatamente; nunca redireciona por regra legada.
       if (pendingSpecial) {
-        const pendingActiveMatch = findConfiguredBairroMatch(pendingSpecial, bairrosAtendidos);
-        if (pendingActiveMatch) {
+        const special = specialNeighborhoodDecision(pendingSpecial, text);
+        if (special === "allow") {
           draft.delivery_mode = "delivery";
-          draft.address_neighborhood = pendingActiveMatch;
+          draft.address_neighborhood = pendingSpecial;
           draft.out_of_delivery_area = false;
           await supabaseAdmin
             .from("order_drafts")
             .update({
               delivery_mode: "delivery",
-              address_neighborhood: pendingActiveMatch,
+              address_neighborhood: pendingSpecial,
               out_of_delivery_area: false,
               updated_at: new Date().toISOString(),
             })
             .eq("conversation_id", conversation.id);
           await replyAndLog(supabaseAdmin, conversation.id, phone, "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?");
-          return Response.json({ ok: true, action: "legacy_special_neighborhood_recovered_as_active" });
+          return Response.json({ ok: true, action: "special_neighborhood_accepted" });
         }
-      }
-
-      // PRIORIDADE ABSOLUTA: antes de consultar qualquer base municipal, lista
-      // negativa ou heurística, compara a mensagem diretamente com TODOS os
-      // bairros ATIVOS configurados no painel. Se houver match, o bairro é
-      // atendido e nenhuma outra regra pode reclassificá-lo como externo.
-      const directActiveNeighborhoodMatch = findConfiguredBairroMatch(text, bairrosAtendidos);
-      if (directActiveNeighborhoodMatch) {
-        // DECISÃO FINAL E SOBERANA: se houve match com um bairro ATIVO do painel,
-        // nenhuma regra especial, lista negativa, heurística, histórico ou cálculo
-        // por distância pode transformar este cliente em "fora da área".
-        console.info("[DELIVERY_AREA] bairro ativo reconhecido", {
-          input: text,
-          match: directActiveNeighborhoodMatch,
-          decision: "WHATSAPP",
-        });
-        draft.delivery_mode = "delivery";
-        draft.address_neighborhood = directActiveNeighborhoodMatch;
-        draft.out_of_delivery_area = false;
-        await supabaseAdmin
-          .from("order_drafts")
-          .update({
-            delivery_mode: "delivery",
-            address_neighborhood: directActiveNeighborhoodMatch,
-            out_of_delivery_area: false,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("conversation_id", conversation.id);
-
-        await replyAndLog(
-          supabaseAdmin,
-          conversation.id,
-          phone,
-          "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
-        );
-        return Response.json({ ok: true, action: "active_neighborhood_accepted_directly" });
+        if (special === "redirect") {
+          await replyAndLog(
+            supabaseAdmin,
+            conversation.id,
+            phone,
+            formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
+          );
+          return Response.json({ ok: true, action: "special_neighborhood_redirect" });
+        }
+        const q = specialNeighborhoodQuestion(pendingSpecial);
+        if (q) {
+          await replyAndLog(supabaseAdmin, conversation.id, phone, q);
+          return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
+        }
       }
 
       const pendingNeighborhoodConfirmation = pendingNeighborhoodConfirmationFromHistory(history);
@@ -4268,82 +3868,64 @@ async function handleIncomingMessageUnlocked(
       }
 
       const candidateValue = candidate.value;
+      const special = specialNeighborhoodDecision(candidateValue, text);
+      if (special === "ask") {
+        const q = specialNeighborhoodQuestion(candidateValue);
+        if (q) {
+          await replyAndLog(supabaseAdmin, conversation.id, phone, q);
+          return Response.json({ ok: true, action: "special_neighborhood_detail_required" });
+        }
+      }
+      if (special === "redirect") {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
+        );
+        return Response.json({ ok: true, action: "special_neighborhood_redirect" });
+      }
 
-      // A lista POSITIVA ativa decide primeiro e de forma definitiva.
       const attendedMatch = findConfiguredBairroMatch(candidateValue, bairrosAtendidos);
-      if (attendedMatch) {
-        draft.delivery_mode = "delivery";
-        draft.address_neighborhood = attendedMatch;
-        draft.out_of_delivery_area = false;
-        await supabaseAdmin
-          .from("order_drafts")
-          .update({
-            delivery_mode: "delivery",
-            address_neighborhood: attendedMatch,
-            out_of_delivery_area: false,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("conversation_id", conversation.id);
+      // Lista positiva ativa vence qualquer cadastro negativo antigo/duplicado.
+      const blockedMatch = attendedMatch ? null : findConfiguredBairroMatch(candidateValue, bairrosNaoAtendidos);
+      const blocked = !!blockedMatch;
+      const attended = special === "allow" || !!attendedMatch;
+      const isKnown = blocked || attended;
+      // Quando houve match na lista ATIVA, salva a própria grafia cadastrada no
+      // painel. Isso impede que um alias municipal fique gravado como se fosse
+      // outro bairro e garante consistência nas próximas rodadas.
+      const resolvedCandidateValue = attendedMatch || blockedMatch || candidateValue;
 
-        console.info("[DELIVERY_AREA] decisão final", {
-          input: text,
-          normalized: normalizeNeighborhoodKey(text),
-          match: attendedMatch,
-          decision: "WHATSAPP",
-        });
+      // REGRA DE SEGURANÇA: "não reconhecido" nunca significa "fora da área".
+      // Só uma localidade comprovadamente reconhecida pode seguir para a decisão
+      // entrega própria x plataformas. Isso impede frases aleatórias de virarem
+      // bairros externos e causarem perda de venda.
+      const recognizedMunicipalityLocality = candidate.source === "known" || isKnown;
+      if (!recognizedMunicipalityLocality) {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          "Não consegui identificar esse nome como um bairro/localidade de Duque de Caxias. Pode conferir e me informar somente o nome do bairro, por favor?",
+        );
+        return Response.json({ ok: true, action: "neighborhood_not_recognized" });
+      }
 
-        const onlyNeighborhood =
-          similarity(normalizeNeighborhoodKey(text), normalizeNeighborhoodKey(attendedMatch)) >= 0.9 &&
-          normalizeNeighborhoodKey(text).length <= normalizeNeighborhoodKey(attendedMatch).length + 8;
-        if (onlyNeighborhood || awaitingNeighborhood) {
-          await replyAndLog(
-            supabaseAdmin,
-            conversation.id,
-            phone,
-            "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
-          );
-          return Response.json({ ok: true, action: "neighborhood_accepted" });
-        }
-        // Se a mesma mensagem contém bairro + outro pedido/pergunta, segue o
-        // fluxo normal da IA já com o bairro travado como atendido.
-      } else {
-        // Somente um bairro/localidade REALMENTE reconhecido e AUSENTE da lista
-        // positiva pode ser enviado às plataformas. Texto aleatório nunca vira
-        // automaticamente "fora da área".
-        const blockedMatch = findConfiguredBairroMatch(candidateValue, bairrosNaoAtendidos);
-        const recognizedMunicipalityLocality = candidate.source === "known" || !!blockedMatch;
-        if (!recognizedMunicipalityLocality) {
-          await replyAndLog(
-            supabaseAdmin,
-            conversation.id,
-            phone,
-            "Não consegui identificar esse nome como um bairro/localidade de Duque de Caxias. Pode conferir e me informar somente o nome do bairro, por favor?",
-          );
-          return Response.json({ ok: true, action: "neighborhood_not_recognized" });
-        }
+      draft.delivery_mode = "delivery";
+      draft.address_neighborhood = resolvedCandidateValue;
+      draft.out_of_delivery_area = !attended;
+      await supabaseAdmin
+        .from("order_drafts")
+        .update({
+          delivery_mode: "delivery",
+          address_neighborhood: resolvedCandidateValue,
+          out_of_delivery_area: !attended,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("conversation_id", conversation.id);
 
-        const externalNeighborhood = blockedMatch || candidateValue;
-        draft.delivery_mode = "delivery";
-        draft.address_neighborhood = externalNeighborhood;
-        draft.out_of_delivery_area = true;
-        await supabaseAdmin
-          .from("order_drafts")
-          .update({
-            delivery_mode: "delivery",
-            address_neighborhood: externalNeighborhood,
-            out_of_delivery_area: true,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("conversation_id", conversation.id);
-
-        console.info("[DELIVERY_AREA] decisão final", {
-          input: text,
-          normalized: normalizeNeighborhoodKey(text),
-          activeMatch: null,
-          recognizedLocality: externalNeighborhood,
-          decision: "PLATAFORMA",
-        });
-
+      if (!attended) {
         await replyAndLog(
           supabaseAdmin,
           conversation.id,
@@ -4352,28 +3934,23 @@ async function handleIncomingMessageUnlocked(
         );
         return Response.json({ ok: true, action: "redirect_platforms_by_neighborhood" });
       }
+
+      // Se a mensagem foi apenas a resposta do bairro, não desperdiça uma
+      // chamada de IA: confirma a cobertura e abre espaço para o cliente dizer
+      // o que deseja. Se ele já incluiu outra pergunta na mesma mensagem, segue
+      // para a IA agora que o bairro está validado.
+      const normalized = normalizeStreet(text);
+      const onlyNeighborhood = similarity(normalizeNeighborhoodKey(text), normalizeNeighborhoodKey(resolvedCandidateValue)) >= 0.9 && normalizeNeighborhoodKey(text).length <= normalizeNeighborhoodKey(resolvedCandidateValue).length + 8;
+      if (onlyNeighborhood) {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
+        );
+        return Response.json({ ok: true, action: "neighborhood_accepted" });
+      }
     } else if (draft.out_of_delivery_area) {
-      // Antes de qualquer redirecionamento, a lista POSITIVA ativa vence.
-      // Se o bairro salvo está ativo no painel, corrige o estado imediatamente
-      // e continua o pedido pelo WhatsApp — nunca manda esse cliente para app.
-      const positiveSavedMatch = draft.address_neighborhood
-        ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
-        : null;
-      if (positiveSavedMatch) {
-        draft.address_neighborhood = positiveSavedMatch;
-        draft.out_of_delivery_area = false;
-        draft.delivery_mode = "delivery";
-        await supabaseAdmin
-          .from("order_drafts")
-          .update({
-            address_neighborhood: positiveSavedMatch,
-            out_of_delivery_area: false,
-            delivery_mode: "delivery",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("conversation_id", conversation.id);
-        // Não retorna aqui: segue o fluxo normal da mensagem atual.
-      } else {
       // O cliente pode corrigir o bairro depois de uma informação anterior.
       // Nunca "prendemos" a conversa no redirecionamento: se ele informar um
       // bairro atendido agora, recuperamos a venda e seguimos pelo WhatsApp.
@@ -4412,23 +3989,7 @@ async function handleIncomingMessageUnlocked(
         formatOutOfAreaDirectReply(cfgStore?.ifood_store_link || null, cfgStore?.nfood_store_link || null),
       );
       return Response.json({ ok: true, action: "redirect_platforms_existing_neighborhood" });
-      }
     }
-  }
-
-  // SEGURANÇA CRÍTICA: se a tabela oficial de bairros não pôde ser carregada,
-  // jamais classifique o cliente como "fora da área" com base em heurística,
-  // prompt antigo ou lista municipal. Uma falha de banco não pode virar perda
-  // de venda. Mantém o atendimento sem redirecionamento e registra o erro no log.
-  if (!bairrosAtendidosLoadOk && draft.delivery_mode !== "pickup") {
-    if (draft.out_of_delivery_area) {
-      draft.out_of_delivery_area = false;
-      await supabaseAdmin
-        .from("order_drafts")
-        .update({ out_of_delivery_area: false, updated_at: new Date().toISOString() })
-        .eq("conversation_id", conversation.id);
-    }
-    console.error("[BAIRROS_ATENDIDOS] Lista oficial indisponível; redirecionamento automático bloqueado por segurança.");
   }
 
   // Saudação pura ("bom dia", "oi", etc, sozinha) NUNCA pode acionar nenhuma
@@ -4519,15 +4080,15 @@ async function handleIncomingMessageUnlocked(
       systemMessage: true,
     });
   }
-  if (!finalText && !pixBlock && !pixKeyLabel && !pixKeyMessage) {
-    // PROTEÇÃO DE CONTINUIDADE: mesmo se a IA falhar depois de uma correção,
-    // ambiguidade ou sequência de ferramentas, o cliente não fica abandonado.
-    // O backend pergunta o próximo dado estrutural que falta no rascunho.
+  if (!finalText && !pixBlock) {
+    // Fallback só quando a IA realmente não gerou nada (ex: provedores fora do
+    // ar). Marcado como system pra NUNCA entrar no histórico que a IA lê — o
+    // fallback antigo entrava no histórico e alimentava o loop de repetição.
     await replyAndLog(
       supabaseAdmin,
       conversation.id,
       phone,
-      buildContinuityFallback(draft),
+      `Tive uma instabilidade no atendimento e não consegui concluir sua mensagem agora. Se puder, envie novamente em instantes; se persistir, um atendente continuará por aqui.`,
       { systemMessage: true },
     );
   }
