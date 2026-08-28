@@ -1,5 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 import { toast } from "sonner";
 import {
   ShoppingCart,
@@ -10,6 +11,10 @@ import {
   CreditCard,
   QrCode,
   Banknote,
+  ShieldCheck,
+  Star,
+  ChevronRight,
+  Copy,
   Flame,
   ClipboardList,
   Search,
@@ -83,7 +88,11 @@ function CustomerHome() {
     "Batatas recheadas, hambúrgueres artesanais e porções irresistíveis. Direto do forno pra sua casa.",
   );
   const [deliveryTime, setDeliveryTime] = useState<number | null>(null);
-  const [paymentLinkUrl, setPaymentLinkUrl] = useState<string>("");
+  const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [cashEnabled, setCashEnabled] = useState(true);
+  const [pixEnabled, setPixEnabled] = useState(true);
+  const [cardEnabled, setCardEnabled] = useState(true);
+  const [pixQrUrl, setPixQrUrl] = useState("");
 
 
   const [couponInput, setCouponInput] = useState("");
@@ -110,7 +119,7 @@ function CustomerHome() {
     neighborhood: "",
     city: "",
     cep: "",
-    payment: "pix" as "pix" | "card" | "link",
+    payment: "pix" as "pix" | "card" | "cash",
     changeFor: "",
   });
 
@@ -126,7 +135,7 @@ function CustomerHome() {
     supabase
       .from("store_config_public")
       .select(
-        "store_name,default_delivery_fee,pix_key,pix_copia_cola,estimated_delivery_time_minutes,banner_image_url,banner_tagline,payment_link_url",
+        "store_name,default_delivery_fee,pix_key,pix_copia_cola,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,digital_menu_cash_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
       )
       .maybeSingle()
       .then(({ data }) => {
@@ -137,12 +146,40 @@ function CustomerHome() {
           setPixCopiaCola(data.pix_copia_cola ?? "");
           setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
           setBannerUrl(data.banner_image_url ?? null);
-          setPaymentLinkUrl((data as any).payment_link_url ?? "");
+          setStripeEnabled((data as any).stripe_enabled === true);
+          setCashEnabled((data as any).digital_menu_cash_enabled !== false);
+          setPixEnabled((data as any).digital_menu_pix_enabled !== false);
+          setCardEnabled((data as any).digital_menu_card_enabled !== false);
           if (data.banner_tagline) setBannerTagline(data.banner_tagline);
         }
       });
   }, []);
 
+  useEffect(() => {
+    const available = [
+      pixEnabled ? "pix" : null,
+      cardEnabled && stripeEnabled ? "card" : null,
+      cashEnabled ? "cash" : null,
+    ].filter(Boolean) as Array<"pix" | "card" | "cash">;
+    if (!available.includes(form.payment) && available[0]) {
+      setForm((current) => ({ ...current, payment: available[0] }));
+    }
+  }, [pixEnabled, cardEnabled, stripeEnabled, cashEnabled]);
+
+  useEffect(() => {
+    const code = pixCopiaCola || pixKey;
+    if (!code) { setPixQrUrl(""); return; }
+    QRCode.toDataURL(code, { width: 280, margin: 1, errorCorrectionLevel: "M" })
+      .then(setPixQrUrl)
+      .catch(() => setPixQrUrl(""));
+  }, [pixCopiaCola, pixKey]);
+
+  async function copyPixCode() {
+    const code = pixCopiaCola || pixKey;
+    if (!code) return;
+    await navigator.clipboard.writeText(code);
+    toast.success("Código Pix copiado");
+  }
 
   const categories = useMemo(
     () => ["Tudo", ...Array.from(new Set(products.map((p) => p.category || "Outros")))],
@@ -268,7 +305,9 @@ function CustomerHome() {
   async function placeOrder() {
     if (!cart.length) return toast.error("Seu carrinho está vazio");
     if (!form.name || !form.phone) return toast.error("Preencha nome e telefone");
-    if (isDelivery && (!form.street || !form.number)) return toast.error("Preencha rua e número");
+    if (isDelivery && (!form.street || !form.number || !form.neighborhood)) return toast.error("Preencha rua, número e bairro");
+    if (form.payment === "pix" && !(pixCopiaCola || pixKey)) return toast.error("Pix ainda não foi configurado pela loja");
+    if (form.payment === "card" && !stripeEnabled) return toast.error("Cartão indisponível no momento");
     // A confirmação definitiva do cupom acontece no banco junto com a criação do pedido.
     // Assim limite geral, limite por cliente e primeira compra não sofrem condição de corrida.
     setPlacing(true);
@@ -286,7 +325,7 @@ function CustomerHome() {
           address_city: isDelivery ? form.city || null : null,
           address_cep: isDelivery ? form.cep || null : null,
           payment_method: form.payment,
-          payment_timing: form.payment === "pix" ? "now" : "delivery",
+          payment_timing: "now",
           change_for: null,
           pix_code: form.payment === "pix" ? pixCopiaCola || pixKey || null : null,
           delivery_fee: isDelivery ? deliveryFee : 0,
@@ -310,11 +349,10 @@ function CustomerHome() {
           return;
         }
         toast.error(("error" in res && res.error) || "Falha ao iniciar pagamento");
-      } else if (form.payment === "link" && paymentLinkUrl) {
-        window.open(paymentLinkUrl, "_blank", "noopener,noreferrer");
-        toast.success(`Pedido #${order.order_number} enviado! Conclua o pagamento no link aberto.`);
       } else {
-        toast.success(`Pedido #${order.order_number} enviado!`);
+        toast.success(form.payment === "pix"
+          ? `Pedido #${order.order_number} criado. Aguardando confirmação do Pix.`
+          : `Pedido #${order.order_number} criado. Aguardando confirmação do pagamento em dinheiro.`);
       }
 
 
@@ -347,6 +385,9 @@ function CustomerHome() {
           >
             <ArrowLeft className="size-5" />
           </button>
+          <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-2xl bg-white/95 p-1.5 shadow-lg backdrop-blur">
+            <img src={hotboxLogo.url} alt="HotBox Delivery" className="size-9 rounded-xl object-cover" />
+          </div>
           {p.image_url ? (
             <img src={p.image_url} alt={p.name} className="h-64 w-full object-cover sm:h-80" />
           ) : (
@@ -413,7 +454,7 @@ function CustomerHome() {
             </div>
             <Button
               onClick={addToCartFromDetail}
-              className="flex-1 justify-between rounded-full py-6 text-base font-bold shadow-md"
+              className="flex-1 justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
             >
               <span>Adicionar</span>
               <span>{brl(getEffectivePrice(p).price * detailQty)}</span>
@@ -431,7 +472,8 @@ function CustomerHome() {
           <button onClick={() => setView("list")}>
             <ArrowLeft className="size-5" />
           </button>
-          <h1 className="font-display text-lg font-black uppercase tracking-wide">Seu carrinho</h1>
+          <img src={hotboxLogo.url} alt="HotBox" className="size-9 rounded-xl object-cover" />
+          <h1 className="font-display text-lg font-black tracking-tight">Sua sacola</h1>
         </header>
 
         <div className="mx-auto max-w-2xl space-y-3 px-4 py-4">
@@ -445,7 +487,7 @@ function CustomerHome() {
                     <img
                       src={i.product.image_url}
                       alt={i.product.name}
-                      className="size-16 shrink-0 rounded-xl object-cover"
+                      className="size-24 shrink-0 rounded-2xl object-cover"
                     />
                   ) : (
                     <div className="grid size-16 shrink-0 place-items-center rounded-xl bg-muted text-[9px] text-muted-foreground">
@@ -551,7 +593,7 @@ function CustomerHome() {
             <div className="mx-auto max-w-2xl">
               <Button
                 onClick={() => setView("checkout")}
-                className="w-full justify-between rounded-full py-6 text-base font-bold shadow-md"
+                className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
               >
                 <span>Finalizar pedido</span>
                 <span>{brl(total)}</span>
@@ -570,7 +612,8 @@ function CustomerHome() {
           <button onClick={() => setView("cart")}>
             <ArrowLeft className="size-5" />
           </button>
-          <h1 className="font-display text-lg font-black uppercase tracking-wide">Finalizar pedido</h1>
+          <img src={hotboxLogo.url} alt="HotBox" className="size-9 rounded-xl object-cover" />
+          <h1 className="font-display text-lg font-black tracking-tight">Finalizar compra</h1>
         </header>
 
         <div className="mx-auto max-w-2xl space-y-6 px-4 py-5">
@@ -682,9 +725,9 @@ function CustomerHome() {
             <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Forma de pagamento</h3>
             <div className="grid grid-cols-3 gap-2">
               {[
-                { v: "pix", label: "Pix", icon: QrCode },
-                { v: "card", label: "Cartão", icon: CreditCard },
-                ...(paymentLinkUrl ? [{ v: "link", label: "Link de pagamento", icon: CreditCard }] : []),
+                ...(pixEnabled ? [{ v: "pix", label: "Pix", icon: QrCode }] : []),
+                ...(cardEnabled && stripeEnabled ? [{ v: "card", label: "Cartão", icon: CreditCard }] : []),
+                ...(cashEnabled ? [{ v: "cash", label: "Dinheiro", icon: Banknote }] : []),
               ].map((opt) => (
                 <button
                   key={opt.v}
@@ -696,34 +739,32 @@ function CustomerHome() {
               ))}
             </div>
 
-            {form.payment === "link" && (
-              <p className="mt-3 text-xs text-muted-foreground">
-                Ao confirmar, abrimos o link de pagamento da loja em outra aba. Seu pedido já fica registrado aqui.
-              </p>
-            )}
-
 
             {form.payment === "pix" && (
-              <div className="mt-3 rounded-xl border border-dashed bg-muted/40 p-3 text-xs">
-                {pixKey || pixCopiaCola ? (
-                  <>
-                    <p className="mb-1 font-semibold">Chave Pix</p>
-                    <p className="break-all font-mono text-[11px]">{pixCopiaCola || pixKey}</p>
-                    <p className="mt-2 text-muted-foreground">
-                      Após finalizar, envie o comprovante pelo WhatsApp pra agilizar sua entrega.
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-muted-foreground">
-                    Chave Pix ainda não configurada — finalize e combine o pagamento pelo WhatsApp.
-                  </p>
-                )}
+              <div className="mt-4 rounded-3xl border border-amber-200 bg-amber-50/70 p-4">
+                <div className="flex items-start gap-4">
+                  {pixQrUrl && <img src={pixQrUrl} alt="QR Code Pix" className="size-32 rounded-2xl border bg-white p-2" />}
+                  <div className="min-w-0 flex-1">
+                    <p className="font-bold text-amber-950">Pague antes do preparo</p>
+                    <p className="mt-1 text-xs leading-relaxed text-amber-900/70">Escaneie o QR Code ou copie o código Pix. O pedido fica aguardando confirmação do pagamento e nunca será cobrado na entrega.</p>
+                    <button type="button" onClick={copyPixCode} className="mt-3 inline-flex items-center gap-2 rounded-full bg-black px-4 py-2 text-xs font-bold text-white">
+                      <Copy className="size-3.5" /> Copiar código Pix
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {form.payment === "cash" && (
+              <div className="mt-4 rounded-3xl border border-red-200 bg-red-50 p-4 text-sm">
+                <p className="font-bold text-red-950">Pagamento em dinheiro é antecipado</p>
+                <p className="mt-1 text-xs leading-relaxed text-red-900/70">O pedido será criado como aguardando pagamento. A loja precisa confirmar o recebimento antes do preparo. Não existe pagamento em dinheiro na entrega.</p>
               </div>
             )}
 
             {form.payment === "card" && (
               <p className="mt-3 text-xs text-muted-foreground">
-                Você será redirecionado para o pagamento seguro após confirmar.
+                Você será redirecionado para o checkout seguro do Stripe. O pedido só entra no fluxo operacional depois que o Stripe confirmar o pagamento.
               </p>
             )}
           </div>
@@ -734,9 +775,9 @@ function CustomerHome() {
             <Button
               onClick={placeOrder}
               disabled={placing}
-              className="w-full justify-between rounded-full py-6 text-base font-bold shadow-md"
+              className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
             >
-              <span>{placing ? "Enviando..." : "Confirmar pedido"}</span>
+              <span>{placing ? "Processando..." : form.payment === "card" ? "Ir para pagamento" : "Criar pedido"}</span>
               <span>{brl(total)}</span>
             </Button>
           </div>
@@ -746,16 +787,16 @@ function CustomerHome() {
   }
 
   return (
-    <div className="min-h-screen bg-background pb-24">
-      <div className="border-b bg-background px-4 py-3">
+    <div className="min-h-screen bg-[#f7f7f7] pb-28">
+      <div className="sticky top-0 z-50 border-b border-black/5 bg-white/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto max-w-2xl">
           <Link to="/" className="flex items-center gap-2.5">
-            <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-11 w-11 rounded-xl object-cover shadow" />
+            <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-12 w-12 rounded-2xl object-cover shadow-sm ring-1 ring-black/10" />
             <div className="leading-tight">
               <p className="font-display text-lg font-black">
-                HOT<span className="text-primary">BOX</span>
+                HOT<span className="text-[#d92d20]">BOX</span>
               </p>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Delivery</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#d92d20]">Delivery</p>
             </div>
             <Link to="/admin/login" className="ml-auto text-[11px] text-muted-foreground hover:text-foreground">
               Área da loja
@@ -766,7 +807,7 @@ function CustomerHome() {
 
       {/* ============ BANNER ============ */}
       <div
-        className="relative overflow-hidden bg-gradient-to-br from-primary via-primary to-accent px-5 py-8 text-primary-foreground"
+        className="relative overflow-hidden bg-gradient-to-br from-[#1c0f0b] via-[#7f1d1d] to-[#f97316] px-5 py-8 text-white"
         style={
           bannerUrl
             ? {
@@ -782,11 +823,11 @@ function CustomerHome() {
             <Flame className="size-3.5" /> Aberto agora
           </span>
           <h1 className="mt-3 font-display text-3xl font-black uppercase leading-[1.05] tracking-tight sm:text-4xl">
-            Muito sabor
+            Sua fome pediu.
             <br />
-            em cada pedido.
+            A Hotbox caprichou.
           </h1>
-          <p className="mt-3 max-w-md text-sm text-primary-foreground/90">{bannerTagline}</p>
+          <p className="mt-3 max-w-md text-sm text-white/85">{bannerTagline}</p>
           <div className="mt-4 flex flex-wrap items-center gap-4 text-sm font-semibold">
             {deliveryTime && (
               <span className="flex items-center gap-1.5">
@@ -824,21 +865,7 @@ function CustomerHome() {
             ))}
           </div>
 
-          <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {[
-              { key: "ativos", label: "Ativos" },
-              { key: "inativos", label: "Inativos" },
-              { key: "todos", label: "Todos" },
-            ].map((f) => (
-              <button
-                key={f.key}
-                onClick={() => setActiveFilter(f.key as ActiveFilter)}
-                className={`flex shrink-0 items-center gap-1.5 rounded-full px-4 py-2 text-sm font-bold transition ${activeFilter === f.key ? "bg-foreground text-background shadow-md" : "border bg-card text-foreground/70"}`}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+
         </div>
       </header>
 
@@ -852,14 +879,14 @@ function CustomerHome() {
             {!query && activeCategory === "Tudo" && featured.length > 0 && (
               <section>
                 <h2 className="mb-3 flex items-center gap-1.5 font-display text-xl font-black uppercase tracking-tight">
-                  <Flame className="size-5 text-primary" /> Em destaque
+                  <Flame className="size-5 text-primary" /> Ofertas e preferidos
                 </h2>
                 <div className="grid grid-cols-2 gap-3">
                   {featured.map((p) => (
                     <button
                       key={p.id}
                       onClick={() => openDetail(p)}
-                      className="group relative aspect-[4/5] overflow-hidden rounded-2xl text-left shadow-sm"
+                      className="group relative aspect-[4/5] overflow-hidden rounded-[24px] bg-white text-left shadow-sm ring-1 ring-black/5"
                     >
                       {p.image_url ? (
                         <img
@@ -885,6 +912,9 @@ function CustomerHome() {
                           );
                         })()}
                       </div>
+                      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-[#ffd400] text-black shadow-sm">
+                        <Plus className="size-5 stroke-[3]" />
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -901,10 +931,10 @@ function CustomerHome() {
                     <button
                       key={p.id}
                       onClick={() => openDetail(p)}
-                      className="flex w-full items-center gap-3 rounded-2xl border bg-card p-3 text-left transition hover:border-primary/40 hover:shadow-sm"
+                      className="flex w-full items-center gap-4 rounded-[24px] border border-black/5 bg-white p-3.5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
                     >
                       {p.image_url ? (
-                        <img src={p.image_url} alt={p.name} className="size-16 shrink-0 rounded-xl object-cover" />
+                        <img src={p.image_url} alt={p.name} className="size-24 shrink-0 rounded-2xl object-cover" />
                       ) : (
                         <div className="grid size-16 shrink-0 place-items-center rounded-xl bg-muted text-[9px] text-muted-foreground">
                           Sem foto
@@ -932,6 +962,9 @@ function CustomerHome() {
                           );
                         })()}
                       </div>
+                      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-[#ffd400] text-black shadow-sm">
+                        <Plus className="size-5 stroke-[3]" />
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -960,7 +993,7 @@ function CustomerHome() {
             <ClipboardList className="size-4" /> Meus pedidos
           </Link>
           <Button
-            className="flex flex-1 items-center justify-center gap-2 rounded-full py-2.5"
+            className="flex flex-1 items-center justify-center gap-2 rounded-full bg-[#ffd400] py-2.5 font-black text-black hover:bg-[#f4ca00]"
             onClick={() => setView("cart")}
           >
             <ShoppingCart className="size-4" />
