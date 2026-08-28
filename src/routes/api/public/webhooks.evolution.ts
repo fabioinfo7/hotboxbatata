@@ -1563,6 +1563,40 @@ function findConfiguredBairroMatch(
   return best && best.score >= 0.82 ? best.raw : null;
 }
 
+/**
+ * Consulta autoritativa da lista de bairros ativos diretamente no banco.
+ * Usada antes de QUALQUER redirecionamento para plataforma. A lista em memória
+ * continua sendo usada para desempenho, mas uma decisão negativa nunca é tomada
+ * sem esta segunda checagem da fonte de verdade do painel.
+ */
+async function findActiveNeighborhoodAuthoritatively(
+  supabaseAdmin: any,
+  neighborhood: string | null | undefined,
+): Promise<string | null> {
+  const input = String(neighborhood ?? "").trim();
+  if (!input) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("bairros_atendidos")
+      .select("nome,ativo");
+    if (error) {
+      console.error("[DELIVERY_AREA] falha na checagem autoritativa de bairros ativos:", error);
+      return null;
+    }
+    const activeNames = (data ?? [])
+      .filter((r: any) => {
+        const ativo = r?.ativo;
+        return ativo === true || ativo === 1 || String(ativo ?? "").toLowerCase() === "true";
+      })
+      .map((r: any) => String(r?.nome ?? "").trim())
+      .filter(Boolean);
+    return findConfiguredBairroMatch(input, activeNames);
+  } catch (err) {
+    console.error("[DELIVERY_AREA] exceção na checagem autoritativa de bairros ativos:", err);
+    return null;
+  }
+}
+
 function isBairroAtendido(neighborhood: string | null | undefined, bairrosAtendidos: string[]): boolean {
   return !!findConfiguredBairroMatch(neighborhood, bairrosAtendidos);
 }
@@ -4322,7 +4356,6 @@ async function handleIncomingMessageUnlocked(
     const { data: bairrosRows, error: bairrosError } = await (supabaseAdmin as any)
       .from("bairros_atendidos")
       .select("id,nome,ativo")
-      .eq("ativo", true)
       .order("nome");
     if (bairrosError) {
       bairrosAtendidosLoadOk = false;
@@ -4332,7 +4365,15 @@ async function handleIncomingMessageUnlocked(
       });
     } else {
       bairrosAtendidosLoadOk = true;
-      bairrosAtendidos = (bairrosRows ?? [])
+      // Carrega todas as linhas e filtra o estado ativo em código. Isso mantém
+      // o webhook fiel ao que a própria tela de Configurações exibe e evita que
+      // uma diferença de serialização do campo `ativo` no PostgREST faça um
+      // bairro visivelmente ativo desaparecer da lista usada pelo atendimento.
+      const bairrosAtivosRows = (bairrosRows ?? []).filter((r: any) => {
+        const ativo = r?.ativo;
+        return ativo === true || ativo === 1 || String(ativo ?? "").toLowerCase() === "true";
+      });
+      bairrosAtendidos = bairrosAtivosRows
         .map((r: any) => String(r?.nome ?? "").trim())
         .filter(Boolean);
       // remove duplicados equivalentes, preservando a grafia cadastrada mais recente
@@ -4483,6 +4524,58 @@ async function handleIncomingMessageUnlocked(
           updated_at: new Date().toISOString(),
         })
         .eq("conversation_id", conversation.id);
+    }
+  }
+
+  // ============ PORTÃO POSITIVO AUTORITATIVO — PRIORIDADE ABSOLUTA ============
+  // Antes de memória de itens/endereço/pagamento e, principalmente, antes de
+  // QUALQUER possibilidade de redirecionamento, confere a mensagem atual contra
+  // a tabela real `bairros_atendidos`. Se houver match ativo, a decisão termina
+  // aqui: atendimento pelo WhatsApp. Nenhum histórico antigo, lista negativa,
+  // cálculo por distância ou estado anterior do draft pode sobrescrever isso.
+  if (draft.delivery_mode !== "pickup") {
+    const authoritativeActiveNeighborhood = await findActiveNeighborhoodAuthoritatively(supabaseAdmin, text);
+    if (authoritativeActiveNeighborhood) {
+      draft.delivery_mode = "delivery";
+      draft.address_neighborhood = authoritativeActiveNeighborhood;
+      draft.out_of_delivery_area = false;
+      const { error: authoritativeNeighborhoodSaveError } = await supabaseAdmin
+        .from("order_drafts")
+        .update({
+          delivery_mode: "delivery",
+          address_neighborhood: authoritativeActiveNeighborhood,
+          out_of_delivery_area: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("conversation_id", conversation.id);
+      if (authoritativeNeighborhoodSaveError) {
+        console.error("[DELIVERY_AREA] falha ao persistir bairro ativo autoritativo:", authoritativeNeighborhoodSaveError);
+      }
+      console.info("[DELIVERY_AREA] bairro ativo confirmado diretamente na fonte", {
+        input: text,
+        match: authoritativeActiveNeighborhood,
+        decision: "WHATSAPP",
+      });
+
+      // Se a mensagem é essencialmente o nome do bairro (caso normal após a
+      // saudação), responde o fluxo oficial e encerra esta rodada. Se o cliente
+      // informou bairro + pedido na mesma mensagem, mantém o bairro travado e
+      // deixa a IA processar o restante da frase.
+      const normalizedInputNeighborhood = normalizeNeighborhoodKey(text);
+      const normalizedMatchedNeighborhood = normalizeNeighborhoodKey(authoritativeActiveNeighborhood);
+      const essentiallyOnlyNeighborhood =
+        normalizedInputNeighborhood === normalizedMatchedNeighborhood ||
+        (similarity(normalizedInputNeighborhood, normalizedMatchedNeighborhood) >= 0.92 &&
+          normalizedInputNeighborhood.length <= normalizedMatchedNeighborhood.length + 6);
+      if (essentiallyOnlyNeighborhood) {
+        await replyAndLog(
+          supabaseAdmin,
+          conversation.id,
+          phone,
+          "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
+        );
+        return Response.json({ ok: true, action: "active_neighborhood_authoritative" });
+      }
     }
   }
 
@@ -4738,6 +4831,33 @@ async function handleIncomingMessageUnlocked(
         // Se a mesma mensagem contém bairro + outro pedido/pergunta, segue o
         // fluxo normal da IA já com o bairro travado como atendido.
       } else {
+        // ÚLTIMA BARREIRA antes de qualquer redirecionamento: consulta novamente
+        // a fonte real do painel. Uma decisão negativa nunca pode depender apenas
+        // da cópia carregada no início da execução.
+        const authoritativeCandidateMatch = await findActiveNeighborhoodAuthoritatively(supabaseAdmin, candidateValue);
+        if (authoritativeCandidateMatch) {
+          draft.delivery_mode = "delivery";
+          draft.address_neighborhood = authoritativeCandidateMatch;
+          draft.out_of_delivery_area = false;
+          const { error: saveError } = await supabaseAdmin
+            .from("order_drafts")
+            .update({
+              delivery_mode: "delivery",
+              address_neighborhood: authoritativeCandidateMatch,
+              out_of_delivery_area: false,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("conversation_id", conversation.id);
+          if (saveError) console.error("[DELIVERY_AREA] falha ao salvar recuperação autoritativa:", saveError);
+          await replyAndLog(
+            supabaseAdmin,
+            conversation.id,
+            phone,
+            "Obrigado pela informação! Em que posso ajudar? Gostaria de ver nosso cardápio?",
+          );
+          return Response.json({ ok: true, action: "active_neighborhood_authoritative_recovery" });
+        }
+
         // Somente um bairro/localidade REALMENTE reconhecido e AUSENTE da lista
         // positiva pode ser enviado às plataformas. Texto aleatório nunca vira
         // automaticamente "fora da área".
@@ -4787,9 +4907,13 @@ async function handleIncomingMessageUnlocked(
       // Antes de qualquer redirecionamento, a lista POSITIVA ativa vence.
       // Se o bairro salvo está ativo no painel, corrige o estado imediatamente
       // e continua o pedido pelo WhatsApp — nunca manda esse cliente para app.
-      const positiveSavedMatch = draft.address_neighborhood
+      const positiveSavedMatchFromMemory = draft.address_neighborhood
         ? findConfiguredBairroMatch(draft.address_neighborhood, bairrosAtendidos)
         : null;
+      const positiveSavedMatch = positiveSavedMatchFromMemory ||
+        (draft.address_neighborhood
+          ? await findActiveNeighborhoodAuthoritatively(supabaseAdmin, draft.address_neighborhood)
+          : null);
       if (positiveSavedMatch) {
         draft.address_neighborhood = positiveSavedMatch;
         draft.out_of_delivery_area = false;
