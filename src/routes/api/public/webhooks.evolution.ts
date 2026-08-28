@@ -1155,6 +1155,7 @@ Regras importantes:
 - NUNCA invente informação que não está listada acima (produto, categoria, ingrediente, preço, prazo, promoção). Se genuinamente não tiver a informação, diga que vai confirmar com a loja — mas isso deve ser raríssimo, porque quase tudo já está descrito acima.
 - Sempre que o cliente informar ou confirmar algo das categorias acima, chame update_order_draft com os campos atualizados — pode chamar várias vezes na mesma conversa.
 - Nunca repita uma pergunta sobre algo que já está em "o que já sei acima".
+- 🚨 REGRA ANTI-LOOP DO RESUMO: depois que o resumo oficial for enviado, NÃO repita o resumo em resposta a confirmação. Respostas afirmativas como "sim", "pode", "pode fechar", "pode finalizar", "confirmo", "está certo", "tudo certo", "perfeito", "fechado", "beleza" ou equivalentes significam CONFIRMAÇÃO FINAL e devem fechar o pedido imediatamente. O resumo só pode ser enviado novamente se o cliente realmente alterar item, quantidade, endereço, nome, forma de pagamento ou outro dado que mude o pedido.
 - 🚨 CONFIRMAÇÃO FINAL OBRIGATÓRIA: É PROIBIDO pedir confirmação enquanto faltar qualquer dado obrigatório. Primeiro complete itens + nome + endereço atual + taxa + forma de pagamento. NÃO existe pergunta adicional sobre crédito/débito nem sobre pagamento agora/na entrega. Se não houver bebida, o BACKEND oferece as bebidas ativas UMA VEZ e aguarda a resposta. Se o cliente adicionar bebida, atualize os itens; se recusar, apenas siga. IMEDIATAMENTE depois da resposta sobre bebida, o BACKEND deve enviar UMA ÚNICA VEZ o resumo oficial com cada item e valor, endereço, pagamento, subtotal, taxa e *TOTAL A PAGAR*, terminando com "Está tudo certo? Posso fechar o pedido?". É PROIBIDO pular o resumo e perguntar apenas "posso finalizar?". Na PRIMEIRA resposta afirmativa ao resumo, o backend informa o prazo de até 40 minutos e cria o pedido automaticamente NA MESMA RODADA, sem aguardar nova aprovação e sem ficar em silêncio.
 - 🚨 NOME DO CLIENTE É OBRIGATÓRIO — SEMPRE: antes de chamar finalize_order, o campo customer_name PRECISA estar preenchido com um nome real dito pelo cliente NESTA conversa. Se você ainda não sabe o nome, NÃO chame finalize_order — pergunte primeiro, de forma natural (ex: "pra fechar aqui, qual o nome pra colocar no pedido?"). Nunca use o nome do WhatsApp (pushName) sem confirmar com o cliente que é ele mesmo. Nunca finalize com nome vazio, nem com "Cliente", "Sem nome" ou qualquer variação genérica.
 - IMPORTANTE: o resumo em "O QUE JÁ SEI" pode conter dados de uma sessão antiga que o cliente nunca confirmou agora — nunca finalize só porque os campos aparecem preenchidos ali. Só finalize se você consegue apontar, na conversa atual, o momento em que o cliente confirmou cada dado.
@@ -2268,6 +2269,16 @@ async function executeTool(
     // não pela IA: isso garante que subtotal, taxa e TOTAL A PAGAR sempre
     // aparecem e impede o modelo de repetir/alterar o texto do resumo.
     if (!ctx.finalConfirmationAllowed) {
+      // Se o resumo já foi enviado e nada foi alterado, NÃO envia novamente.
+      // Apenas aguarda a confirmação do cliente.
+      if (draft.awaiting_final_confirmation) {
+        return {
+          result: {
+            status: "awaiting_final_confirmation",
+            instruction: "O resumo já foi enviado. Não repita o resumo; aguarde apenas a confirmação do cliente.",
+          },
+        };
+      }
       const finalSummary = await buildFinalConfirmationSummary(supabaseAdmin, draft);
       if (finalSummary.unmatched.length) {
         return {
@@ -3215,9 +3226,37 @@ async function runConversationalTurn(opts: {
       if (msg?.role === "user") break;
     }
   }
+  // O resumo oficial é salvo como mensagem de sistema e pode ficar fora do
+  // histórico reduzido que a IA recebe. Por isso a confirmação final também
+  // consulta o histórico REAL do banco. Isso impede o loop em que o cliente
+  // diz "sim", o backend não enxerga o resumo e a IA manda o mesmo resumo de novo.
+  let recentOfficialSummaryInDb = false;
+  if (isExplicitOrderConfirmation(lastUserText)) {
+    try {
+      const { data: recentOut } = await opts.supabaseAdmin
+        .from("whatsapp_messages")
+        .select("body,direction,created_at")
+        .eq("conversation_id", opts.conversation.id)
+        .eq("direction", "out")
+        .not("body", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(8);
+      recentOfficialSummaryInDb = (recentOut ?? []).some((m: any) => {
+        const body = String(m?.body ?? "");
+        return /resumo do (?:seu )?pedido/i.test(body) &&
+          /total a pagar/i.test(body) &&
+          /(posso fechar o pedido|est[aá] tudo certo|pode fechar)/i.test(body);
+      });
+    } catch (err) {
+      console.error("[final-confirmation] falha ao consultar resumo recente:", err);
+    }
+  }
+
   const finalConfirmationAllowed =
     isExplicitOrderConfirmation(lastUserText) &&
-    (Boolean(opts.draft.awaiting_final_confirmation) || previousAssistantRequestedConfirmation);
+    (Boolean(opts.draft.awaiting_final_confirmation) ||
+      previousAssistantRequestedConfirmation ||
+      recentOfficialSummaryInDb);
 
   // Caminho determinístico: se o cliente acabou de confirmar explicitamente o
   // resumo, o backend fecha o pedido antes de consultar a IA. Assim o modelo
@@ -3227,24 +3266,31 @@ async function runConversationalTurn(opts: {
     // apenas uma execução pode consumir awaiting_final_confirmation=true.
     // Se a Evolution reenviar o mesmo evento ou dois workers processarem o
     // mesmo "sim" ao mesmo tempo, o segundo é silenciado e NÃO repete resumo.
-    const { data: claimedConfirmation, error: claimError } = await opts.supabaseAdmin
-      .from("order_drafts")
-      .update({ awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
-      .eq("conversation_id", opts.conversation.id)
-      .eq("awaiting_final_confirmation", true)
-      .select("conversation_id")
-      .maybeSingle();
-    if (claimError) {
-      messages.push({ role: "system", content: `[falha ao reservar confirmação final] ${claimError.message}` });
-    } else if (!claimedConfirmation) {
-      return {
-        silenced: true,
-        finalText: "",
-        pixBlock: null,
-        pixKeyLabel: null,
-        pixKeyMessage: null,
-        sendMenuImage: false,
-      };
+    // Se a flag ainda está true, fazemos o claim atômico para proteger contra
+    // webhook duplicado. Se a flag já foi perdida, mas acabamos de comprovar
+    // pelo histórico real que um resumo oficial foi enviado, NÃO descartamos
+    // a confirmação: seguimos para finalize_order. Esse era um dos motivos do
+    // "sim" ser consumido sem fechar o pedido.
+    if (opts.draft.awaiting_final_confirmation) {
+      const { data: claimedConfirmation, error: claimError } = await opts.supabaseAdmin
+        .from("order_drafts")
+        .update({ awaiting_final_confirmation: false, updated_at: new Date().toISOString() })
+        .eq("conversation_id", opts.conversation.id)
+        .eq("awaiting_final_confirmation", true)
+        .select("conversation_id")
+        .maybeSingle();
+      if (claimError) {
+        messages.push({ role: "system", content: `[falha ao reservar confirmação final] ${claimError.message}` });
+      } else if (!claimedConfirmation && !recentOfficialSummaryInDb && !previousAssistantRequestedConfirmation) {
+        return {
+          silenced: true,
+          finalText: "",
+          pixBlock: null,
+          pixKeyLabel: null,
+          pixKeyMessage: null,
+          sendMenuImage: false,
+        };
+      }
     }
     opts.draft.awaiting_final_confirmation = false;
 
