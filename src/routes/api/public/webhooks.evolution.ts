@@ -769,11 +769,29 @@ function buildContinuityFallback(draft: Draft): string {
       return `${namePrefix}por favor, me informe o endereço completo para entrega (rua e número).`;
     }
 
+    // Se o endereço veio parcialmente e o nome ainda não foi informado,
+    // continue agrupando NOME + parte faltante do endereço. Isso evita o fluxo
+    // voltar a pedir apenas endereço quando a regra comercial é coletar os dois
+    // juntos antes de seguir para taxa/pagamento.
     if (!draft.address_street) {
+      if (missingName) {
+        return (
+          "*Por favor, me informe:*\n\n" +
+          "*Nome de quem vai receber:*\n" +
+          "*Rua do endereço de entrega:*"
+        );
+      }
       return `${namePrefix}para completar o endereço, poderia me informar somente a rua, por favor?`;
     }
 
     if (!draft.address_number) {
+      if (missingName) {
+        return (
+          "*Por favor, me informe:*\n\n" +
+          "*Nome de quem vai receber:*\n" +
+          "*Número do endereço de entrega:*"
+        );
+      }
       return `${namePrefix}para completar o endereço, poderia me informar somente o número, por favor?`;
     }
 
@@ -1619,7 +1637,7 @@ Sua missão é coletar os dados necessários para fechar o pedido com o MENOR N�
 ⚠️ PEDIDOS MÚLTIPLOS PRO MESMO ENDEREÇO — MUITO IMPORTANTE:
 Às vezes um cliente pede várias coisas de uma vez só que na verdade são pedidos SEPARADOS pra pessoas diferentes com pagamentos diferentes, tudo pro mesmo endereço (ex: "manda 3 lanches, um pra mim no pix, um pro meu irmão no débito, e um pra minha esposa no crédito"). Nesse caso:
 1. Trate cada um como um pedido individual — colete nome do destinatário + itens dele + forma de pagamento dele, e chame finalize_order pra CADA UM separadamente, um de cada vez.
-2. Só reutilize o endereço entre vários pedidos separados quando o próprio cliente tiver deixado claro que todos são para o mesmo endereço nesta conversa. Nunca revele um endereço histórico nem pergunte "é o mesmo endereço?". Em um novo pedido sem essa indicação explícita, pergunte: "Qual seria o endereço de entrega, por favor?".
+2. Só reutilize o endereço entre vários pedidos separados quando o próprio cliente tiver deixado claro que todos são para o mesmo endereço nesta conversa. Nunca revele um endereço histórico nem pergunte "é o mesmo endereço?". Em um novo pedido sem essa indicação explícita e quando nome + endereço estiverem faltando, peça os dois juntos, de forma organizada: "*Por favor, me informe:*\n\n*Nome de quem vai receber:*\n*Endereço completo para entrega (rua e número):*".
 3. NUNCA esqueça que ainda faltam pedidos da mesma leva. Se o cliente disse "3 lanches" e você já fechou 1, você SABE que ainda faltam 2 — continue perguntando os dados do próximo, não comece do zero nem trate como se fosse tudo terminado.
 4. Só depois de fechar TODOS os pedidos que o cliente pediu daquela vez, pergunte se ele deseja mais alguma coisa.
 🚫 ERRO GRAVE A NUNCA COMETER: quando são pessoas diferentes, cada uma é UM pedido próprio, chamado com update_order_draft usando quantity 1 (ou a quantidade que aquela pessoa específica pediu) e UM customer_name e UM payment_method — seguido de finalize_order antes de começar o próximo. NUNCA registre isso como um item só com quantity somada (ex: "3x Batata Recheada" com um único customer_name e um único payment_method) — isso mistura pessoas e formas de pagamento diferentes num pedido só, o que está errado mesmo que o produto seja idêntico para as três pessoas. Cada finalize_order fecha exatamente 1 pedido de 1 pessoa com 1 forma de pagamento.
@@ -1636,7 +1654,7 @@ ${businessHoursText ? `HORÁRIO DE ATENDIMENTO DA LOJA: ${businessHoursText}. Se
 FORMAS DE PAGAMENTO ACEITAS: Pix ou cartão (crédito ou débito). Ao perguntar, peça somente a FORMA de pagamento; nunca pergunte se será agora ou na entrega e nunca pergunte crédito ou débito. Dinheiro em espécie não é aceito, por segurança do entregador.
 
 ${lastOrderText ? `CONTEXTO — ÚLTIMO PEDIDO DESSE CLIENTE:\n${lastOrderText}\nSe o cliente comentar, perguntar sobre esse pedido, ou só agradecer, responda com base nesse contexto (não tente vender de novo nem reinicie o atendimento do zero, a menos que ele peça algo novo claramente). Se ele pedir algo novo, é um pedido novo — pode seguir o fluxo normal.\n` : ""}
-${lastAddressText ? `🏠 CONTEXTO INTERNO: existe um endereço histórico desse cliente, mas ele NÃO é confirmação do endereço deste novo pedido. NUNCA revele, cite, sugira nem pergunte "é o mesmo endereço?". Para todo novo pedido de entrega, use somente o endereço que o cliente informar nesta conversa e, quando chegar a essa etapa, agrupe na mesma solicitação endereço + nome + pagamento que ainda estiverem faltando. O endereço histórico serve apenas como contexto interno e jamais deve ser copiado automaticamente para o novo pedido.
+${lastAddressText ? `🏠 CONTEXTO INTERNO: existe um endereço histórico desse cliente, mas ele NÃO é confirmação do endereço deste novo pedido. NUNCA revele, cite, sugira nem pergunte "é o mesmo endereço?". Para todo novo pedido de entrega, use somente o endereço que o cliente informar nesta conversa. Quando chegar à coleta dos dados e NOME + ENDEREÇO ainda estiverem faltando, peça os dois JUNTOS na mesma mensagem, com diagramação clara. NÃO peça pagamento junto nessa primeira mensagem; ele vem depois da confirmação da taxa, salvo se o cliente o informar espontaneamente. O endereço histórico serve apenas como contexto interno e jamais deve ser copiado automaticamente para o novo pedido.
 ` : ""}
 
 🚨 REGRA ABSOLUTA — FONTE ÚNICA DE VERDADE SOBRE O NEGÓCIO: as ÚNICAS informações reais sobre produtos, categorias, ingredientes, preços, estoque, taxa de entrega e formas de pagamento são as que estão escritas em "CATEGORIAS DISPONÍVEIS" e "CARDÁPIO ATIVO AGORA" logo abaixo — geradas agora mesmo, direto do sistema da loja. Você NÃO tem conhecimento próprio sobre o que essa loja vende. Nunca complete com o que é "comum" ou "esperado" numa loja desse tipo, mesmo que pareça um item genérico e óbvio de delivery — se não está escrito abaixo, a loja não tem, e mencionar isso pro cliente é um erro grave.
@@ -2949,7 +2967,9 @@ async function executeTool(
           missing,
           instruction: paymentOnly
             ? `Pergunte exatamente: "${PAYMENT_QUESTION_TEXT}" Não mostre resumo e não peça confirmação ainda.`
-            : "Peça somente os campos listados em missing. Para endereço de entrega, pergunte: 'Qual seria o endereço de entrega, por favor?'. Não use endereço histórico e não mostre resumo ainda.",
+            : (missing.some((m) => /nome/i.test(m)) && missing.some((m) => /endereço|rua|número/i.test(m)))
+              ? "Nome e endereço estão faltando. Peça os dois JUNTOS e de forma organizada, exatamente neste formato: '*Por favor, me informe:*\n\n*Nome de quem vai receber:*\n*Endereço completo para entrega (rua e número):*'. Não peça pagamento junto, não use endereço histórico e não mostre resumo ainda."
+              : "Peça somente os campos listados em missing. Se faltar apenas uma parte do endereço, peça somente essa parte; se o nome também estiver faltando, agrupe nome + parte faltante do endereço na mesma mensagem. Não use endereço histórico e não mostre resumo ainda.",
         },
       };
     }
