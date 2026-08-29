@@ -745,20 +745,58 @@ function buildContinuityFallback(draft: Draft): string {
   const items = Array.isArray(draft.items) ? draft.items : [];
   if (!items.length) return "Perfeito! Pode me dizer o que você gostaria de pedir e a quantidade de cada item, por favor?";
   if (!draft.delivery_mode) return "Perfeito. O pedido será para entrega ou retirada, por favor?";
+
+  const missingName = !draft.customer_name;
+  const missingPayment = !draft.payment_method;
+  const paymentOptions =
+    "Aceitamos cartão de crédito, cartão de débito ou Pix.\n\n" +
+    "*Observação:* Não aceitamos dinheiro em espécie, para segurança do nosso entregador.";
+
   if (draft.delivery_mode === "delivery") {
     if (!draft.address_neighborhood) return "Para continuar com a entrega, poderia me informar seu bairro, por favor?";
-    if (!draft.address_street && !draft.address_number)
+
+    // COLETA INTELIGENTE: ao pedir endereço, aproveita a mesma mensagem para
+    // solicitar também nome e pagamento quando esses dados ainda não existem.
+    // Se algum deles já estiver persistido, ele NÃO é perguntado novamente.
+    if (!draft.address_street && !draft.address_number) {
+      if (missingName && missingPayment) {
+        return "Para agilizar seu pedido, poderia me informar o endereço de entrega (rua e número), o nome de quem vai receber e a forma de pagamento, por favor?\n" + paymentOptions;
+      }
+      if (missingName) {
+        return "Para agilizar seu pedido, poderia me informar o endereço de entrega (rua e número) e o nome de quem vai receber, por favor?";
+      }
+      if (missingPayment) {
+        return "Para agilizar seu pedido, poderia me informar o endereço de entrega (rua e número) e a forma de pagamento, por favor?\n" + paymentOptions;
+      }
       return "Qual seria o endereço de entrega, por favor? Pode me informar a rua e o número?";
-    if (!draft.address_street) return "Para completar o endereço, poderia me informar somente a rua, por favor?";
-    if (!draft.address_number) return "Para completar o endereço, poderia me informar somente o número, por favor?";
+    }
+
+    if (!draft.address_street) {
+      const extras = [missingName ? "o nome de quem vai receber" : "", missingPayment ? "a forma de pagamento" : ""].filter(Boolean);
+      if (extras.length) {
+        return `Para completar os dados, poderia me informar a rua e ${extras.join(" e ")}, por favor?${missingPayment ? "\n" + paymentOptions : ""}`;
+      }
+      return "Para completar o endereço, poderia me informar somente a rua, por favor?";
+    }
+
+    if (!draft.address_number) {
+      const extras = [missingName ? "o nome de quem vai receber" : "", missingPayment ? "a forma de pagamento" : ""].filter(Boolean);
+      if (extras.length) {
+        return `Para completar os dados, poderia me informar o número do endereço e ${extras.join(" e ")}, por favor?${missingPayment ? "\n" + paymentOptions : ""}`;
+      }
+      return "Para completar o endereço, poderia me informar somente o número, por favor?";
+    }
   }
-  if (!draft.customer_name) return "Para continuar, qual é o nome de quem vai receber o pedido, por favor?";
+
+  // Endereço já completo: ainda agrupamos nome + pagamento se os dois faltarem.
+  if (missingName && missingPayment) {
+    return "Para agilizar, poderia me informar o nome de quem vai receber e a forma de pagamento, por favor?\n" + paymentOptions;
+  }
+  if (missingName) return "Para continuar, qual é o nome de quem vai receber o pedido, por favor?";
   if (draft.delivery_mode === "delivery" && draft.estimated_delivery_fee == null) {
     return "Só um instante enquanto confirmo a taxa de entrega para esse endereço.";
   }
-  if (!draft.payment_method) {
-    return PAYMENT_QUESTION_TEXT;
-  }
+  if (missingPayment) return PAYMENT_QUESTION_TEXT;
   if (draft.awaiting_final_confirmation) return "Fico aguardando sua confirmação para fechar o pedido.";
   return "Perfeito. Vou preparar o resumo do pedido para sua confirmação.";
 }
@@ -900,12 +938,23 @@ function parseAddressFromCustomerTurn(
   if (!addressContext && !explicitStreet) return null;
 
   // Resposta isolada à pergunta de número: "324", "Número 324", "nº 324".
-  // Faz o reconhecimento na versão normalizada para cobrir "Número" com acento.
   const normalizedRaw = normalizeStreet(raw).replace(/[º°]/g, "o");
   const onlyNumber = normalizedRaw.match(/^(?:(?:n(?:o|umero)?\.?|numero)\s*[:#-]?\s*)?(\d{1,6}[a-z]?)$/i);
   if (onlyNumber && /\bnumero\b/.test(prev)) return { number: onlyNumber[1] };
 
-  // Rua + número no mesmo turno: "Av Brasil 324", "Rua X, nº 10".
+  // COLETA AGRUPADA: aceita endereço dentro de uma resposta que também traz
+  // nome e pagamento, por exemplo: "Rua Cananéia, 12, Evanilda, Pix".
+  // Primeiro procura um logradouro explícito e para no número, sem engolir os
+  // outros dados da mesma mensagem.
+  const embedded = raw.match(
+    /((?:rua|r\.?|avenida|av\.?|travessa|tv\.?|estrada|rodovia|alameda|praca|praça)\s+[^,;\n]+?)[,\s]+(?:n(?:[º°o]|umero)?\.?\s*)?(\d{1,6}[a-zA-Z]?)(?=\s*(?:[,;\n]|$))/i,
+  );
+  if (embedded) {
+    const street = embedded[1].replace(/[,-]+\s*$/, "").trim();
+    if (street && !/^\d+$/.test(street)) return { street, number: embedded[2] };
+  }
+
+  // Rua + número como resposta inteira: "Av Brasil 324", "Rua X, nº 10".
   const full = raw.match(/^(.+?)(?:\s*,?\s+(?:n(?:[º°o]|umero)?\.?\s*)?)(\d{1,6}[a-zA-Z]?)\s*$/i);
   if (!full) return null;
   const street = full[1].replace(/[,-]+\s*$/, "").trim();
@@ -1520,6 +1569,10 @@ ${conversationStageText}
 
 📍 INÍCIO DA CONVERSA: para atendimento de ENTREGA, a primeira informação operacional é sempre o BAIRRO. Não pergunte nome, endereço completo, forma de pagamento ou itens antes de validar o bairro. Depois que o bairro for validado como atendido pelo WhatsApp, agradeça e pergunte de forma natural em que pode ajudar. Em conversa já em andamento, nunca repita saudação nem volte a pedir um dado já confirmado.
 
+⚡ COLETA INTELIGENTE PARA ENCURTAR O ATENDIMENTO — REGRA OBRIGATÓRIA: depois que o cliente já escolheu os itens e chegou a hora de pedir o endereço, tente coletar NA MESMA MENSAGEM todos os dados transacionais ainda ausentes: endereço de entrega (rua e número), nome de quem vai receber e forma de pagamento. Exemplo: "Para agilizar seu pedido, poderia me informar o endereço de entrega (rua e número), o nome de quem vai receber e a forma de pagamento, por favor? Aceitamos cartão de crédito, cartão de débito ou Pix. Observação: não aceitamos dinheiro em espécie, para segurança do nosso entregador." Se o cliente responder os três dados, registre os três e AVANCE IMEDIATAMENTE para taxa/bebida/resumo, sem fazer perguntas intermediárias. Se responder apenas parte, registre TUDO que veio e peça depois SOMENTE os campos que realmente faltaram. Se um desses dados já estava salvo antes, NÃO o inclua de novo na pergunta agrupada. Essa coleta agrupada não altera a regra de BAIRRO PRIMEIRO.
+
+🚫 ZERO LOOP DE DADOS JÁ INFORMADOS — REGRA INVIOLÁVEL: endereço, nome, pagamento, bairro, itens, quantidade, taxa e qualquer outro dado presente em "O QUE JÁ SEI DO PEDIDO" são fatos persistidos e NUNCA podem ser solicitados novamente, salvo se o próprio cliente disser que deseja corrigir/alterar aquele dado. Antes de fazer qualquer pergunta, confira os campos já preenchidos. Se uma resposta trouxer várias informações de uma vez, absorva todas na mesma rodada. Se faltar apenas UM campo, peça só esse campo. Se não faltar nenhum, avance imediatamente. Nunca reinicie uma sequência de perguntas porque o cliente respondeu em formato diferente do esperado.
+
 🧠 CONDUÇÃO NATURAL DA VENDA — O ATENDIMENTO É UMA CONVERSA, NÃO UM FORMULÁRIO: interprete o SENTIDO da última mensagem junto com todo o histórico e com os dados já coletados. Quando o cliente demonstrar que quer comprar, que já escolheu, que já sabe o que deseja, que não precisa ver o cardápio ou qualquer intenção equivalente, confira primeiro o que AINDA FALTA para conseguir montar o pedido. Se ainda não existir nenhum item confirmado no rascunho, o passo natural é perguntar o que ele deseja pedir e as quantidades. NUNCA trate uma declaração como “já sei o que vou pedir” como se os produtos já tivessem sido informados. Não pule diretamente para endereço, nome, pagamento, bebida, resumo ou confirmação enquanto a conversa de compra ainda não revelou quais itens compõem o pedido. Ao mesmo tempo, se o cliente estiver apenas fazendo uma pergunta informativa, responda à pergunta normalmente sem forçá-lo a comprar. O objetivo é agir como um bom atendente humano: compreender intenção, obter naturalmente a informação necessária e conduzir a venda até a conclusão sem saltos ilógicos.
 
 🚫 CARDÁPIO EM TEXTO: nunca liste o cardápio inteiro em texto. Para ENTREGA, o cardápio do WhatsApp só pode ser enviado depois que o bairro estiver validado como atendido pelo entregador próprio. Se o bairro for externo, NÃO envie a imagem do cardápio do WhatsApp: redirecione para a plataforma, onde ficam os preços e o cardápio daquela região. Se ainda não souber o bairro, peça o bairro educadamente primeiro. Para RETIRADA, o cardápio do WhatsApp pode ser enviado quando solicitado. Pergunta sobre item específico também respeita a regra de bairro antes de revelar preço.
@@ -1557,10 +1610,10 @@ Você também é um ótimo vendedor, do nível dos melhores atendentes de delive
 - Nunca ofereça mais de uma sugestão por pedido — uma sugestão bem colocada vende mais que várias seguidas, que soa insistente.
 - Isso é sempre secundário ao objetivo principal: fechar o pedido rápido e sem fricção. Se o cliente já está com pressa ou objetivo claro, não perca tempo com sugestão nenhuma.
 
-Sua missão é coletar, ao longo da conversa (não precisa tudo de uma vez, vá perguntando naturalmente conforme a conversa flui, só depois que o cliente já demonstrou que quer pedir algo), os dados necessários pra fechar o pedido:
+Sua missão é coletar os dados necessários para fechar o pedido com o MENOR NÚMERO DE MENSAGENS possível. Depois que o cliente já demonstrou que quer pedir e os itens estão definidos, agrupe endereço + nome + pagamento na mesma solicitação sempre que esses campos ainda estiverem faltando:
 - Nome de quem vai receber esse pedido específico${pushName ? ` (o nome do WhatsApp de quem está conversando é "${pushName}", mas pode não ser o nome real, ou pode estar pedindo pra outra pessoa — confirme)` : ""}
 - Se é pra ENTREGAR ou se o cliente vai RETIRAR na loja — pergunte isso naturalmente cedo na conversa (ex: "é pra entrega ou você prefere buscar aqui?"). Isso muda tudo o que vem depois.
-- Se for entrega: depois que o cliente demonstrar intenção de fazer o pedido e os itens estiverem definidos, pergunte "Qual seria o endereço de entrega, por favor?". Para o endereço atual do pedido, rua e número precisam ser informados pelo cliente. O BAIRRO JÁ VALIDADO NO INÍCIO DA CONVERSA CONTINUA VÁLIDO E DEVE SER REUTILIZADO AUTOMATICAMENTE — NUNCA peça o bairro novamente se ele já foi confirmado neste atendimento. Exemplo: bairro validado = "Chacrinha"; cliente depois responde "Rua Andaraí, 10" → registre rua=Rua Andaraí, número=10 e mantenha bairro=Chacrinha. Só pergunte bairro novamente se nenhum bairro tiver sido validado ainda ou se o próprio cliente disser que quer corrigir/mudar o bairro. NUNCA revele ao cliente um endereço salvo de pedidos anteriores e nunca pergunte se é "o mesmo endereço". Se quiser passar referência, ótimo, mas não é obrigatório. NUNCA pergunte a cidade. Se for retirada, NÃO precisa de endereço nenhum — pula direto pros itens.
+- Se for entrega: depois que os itens estiverem definidos, peça numa única mensagem o endereço (rua e número), o nome de quem vai receber e a forma de pagamento, MAS somente os campos que ainda estiverem faltando. Para o endereço atual do pedido, rua e número precisam ser informados pelo cliente. O BAIRRO JÁ VALIDADO NO INÍCIO DA CONVERSA CONTINUA VÁLIDO E DEVE SER REUTILIZADO AUTOMATICAMENTE — NUNCA peça o bairro novamente se ele já foi confirmado neste atendimento. Exemplo: bairro validado = "Chacrinha"; cliente depois responde "Rua Andaraí, 10" → registre rua=Rua Andaraí, número=10 e mantenha bairro=Chacrinha. Só pergunte bairro novamente se nenhum bairro tiver sido validado ainda ou se o próprio cliente disser que quer corrigir/mudar o bairro. NUNCA revele ao cliente um endereço salvo de pedidos anteriores e nunca pergunte se é "o mesmo endereço". Se quiser passar referência, ótimo, mas não é obrigatório. NUNCA pergunte a cidade. Se for retirada, NÃO precisa de endereço nenhum — pula direto pros itens.
 - 🚨 CHAME update_order_draft NA HORA ASSIM QUE TIVER RUA + NÚMERO E JÁ EXISTIR BAIRRO VALIDADO NA CONVERSA. Não espere o cliente repetir o bairro. O sistema deve combinar rua+número recém-informados com o bairro validado no início e calcular a taxa imediatamente. Se o cliente informar um novo bairro explicitamente, aí sim atualize o bairro e revalide antes de calcular.
 - Itens do pedido — use SOMENTE os nomes e preços exatos do cardápio abaixo, nunca invente produto nem preço
 - QUANTIDADE INTELIGENTE — NUNCA pergunte quantidade quando ela já estiver explícita na frase do cliente. Artigos e números contam como quantidade: "uma de costela", "uma costela", "1 costela" = 1 unidade; "duas de pizza", "2 de pizza" = 2 unidades; "quero uma" = 1 unidade. Absorva a quantidade junto com o produto e chame update_order_draft. Só pergunte quantidade se realmente nenhuma quantidade puder ser inferida do que o cliente disse.
@@ -1587,7 +1640,7 @@ ${businessHoursText ? `HORÁRIO DE ATENDIMENTO DA LOJA: ${businessHoursText}. Se
 FORMAS DE PAGAMENTO ACEITAS: Pix ou cartão (crédito ou débito). Ao perguntar, peça somente a FORMA de pagamento; nunca pergunte se será agora ou na entrega e nunca pergunte crédito ou débito. Dinheiro em espécie não é aceito, por segurança do entregador.
 
 ${lastOrderText ? `CONTEXTO — ÚLTIMO PEDIDO DESSE CLIENTE:\n${lastOrderText}\nSe o cliente comentar, perguntar sobre esse pedido, ou só agradecer, responda com base nesse contexto (não tente vender de novo nem reinicie o atendimento do zero, a menos que ele peça algo novo claramente). Se ele pedir algo novo, é um pedido novo — pode seguir o fluxo normal.\n` : ""}
-${lastAddressText ? `🏠 CONTEXTO INTERNO: existe um endereço histórico desse cliente, mas ele NÃO é confirmação do endereço deste novo pedido. NUNCA revele, cite, sugira nem pergunte "é o mesmo endereço?". Para todo novo pedido de entrega, pergunte de forma simples e educada: "Qual seria o endereço de entrega, por favor?" e use somente o endereço que o cliente informar nesta conversa. O endereço histórico serve apenas como contexto interno e jamais deve ser copiado automaticamente para o novo pedido.
+${lastAddressText ? `🏠 CONTEXTO INTERNO: existe um endereço histórico desse cliente, mas ele NÃO é confirmação do endereço deste novo pedido. NUNCA revele, cite, sugira nem pergunte "é o mesmo endereço?". Para todo novo pedido de entrega, use somente o endereço que o cliente informar nesta conversa e, quando chegar a essa etapa, agrupe na mesma solicitação endereço + nome + pagamento que ainda estiverem faltando. O endereço histórico serve apenas como contexto interno e jamais deve ser copiado automaticamente para o novo pedido.
 ` : ""}
 
 🚨 REGRA ABSOLUTA — FONTE ÚNICA DE VERDADE SOBRE O NEGÓCIO: as ÚNICAS informações reais sobre produtos, categorias, ingredientes, preços, estoque, taxa de entrega e formas de pagamento são as que estão escritas em "CATEGORIAS DISPONÍVEIS" e "CARDÁPIO ATIVO AGORA" logo abaixo — geradas agora mesmo, direto do sistema da loja. Você NÃO tem conhecimento próprio sobre o que essa loja vende. Nunca complete com o que é "comum" ou "esperado" numa loja desse tipo, mesmo que pareça um item genérico e óbvio de delivery — se não está escrito abaixo, a loja não tem, e mencionar isso pro cliente é um erro grave.
@@ -1879,18 +1932,47 @@ function previousAssistantAskedCustomerName(history: { role: string; content: st
 }
 
 function extractPlausibleCustomerName(text: string): string | null {
-  const raw = String(text ?? "").trim().replace(/^[\s,.;:!?-]+|[\s,.;:!?-]+$/g, "");
-  if (!raw || raw.length < 2 || raw.length > 80) return null;
-  if (/\d/.test(raw)) return null;
-  const normalized = normalizeStreet(raw);
-  if (/\b(?:sim|nao|pix|cartao|credito|debito|entrega|retirada|endereco|rua|avenida|bairro|batata|costela|strogonoff|frango|pedido)\b/.test(normalized)) return null;
-  const cleaned = raw
-    .replace(/^(?:meu nome (?:e|é)|o nome (?:e|é)|nome[:\s]+|pode colocar|coloca|coloque)\s+/i, "")
-    .trim();
-  const words = cleaned.split(/\s+/).filter(Boolean);
-  if (!words.length || words.length > 6) return null;
-  if (!words.every((w) => /^[A-Za-zÀ-ÖØ-öø-ÿ'’-]{2,}$/.test(w))) return null;
-  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+  const original = String(text ?? "").trim();
+  const raw = original.replace(/^[\s,.;:!?-]+|[\s,.;:!?-]+$/g, "");
+  if (!raw || raw.length < 2 || raw.length > 240) return null;
+
+  const normalizeCandidate = (candidate: string): string | null => {
+    const cleaned = candidate
+      .trim()
+      .replace(/^[\s,.;:!?-]+|[\s,.;:!?-]+$/g, "")
+      .replace(/^(?:meu nome (?:e|é)|o nome (?:e|é)|nome(?: de quem vai receber)?[:\s]+|quem vai receber(?: e| é)?|pode colocar|coloca|coloque)\s+/i, "")
+      .trim();
+    if (!cleaned || cleaned.length < 2 || cleaned.length > 80 || /\d/.test(cleaned)) return null;
+    const normalized = normalizeStreet(cleaned);
+    if (/\b(?:sim|nao|pix|cartao|credito|debito|dinheiro|entrega|retirada|endereco|rua|avenida|travessa|estrada|rodovia|alameda|praca|bairro|casa|apto|apartamento|bloco|lote|quadra|complemento|batata|costela|strogonoff|frango|pedido)\b/.test(normalized)) return null;
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    if (!words.length || words.length > 6) return null;
+    if (!words.every((w) => /^[A-Za-zÀ-ÖØ-öø-ÿ'’-]{2,}$/.test(w))) return null;
+    return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+  };
+
+  // Nome explícito dentro de uma resposta maior: "Rua X, 10, meu nome é Ana, Pix".
+  const explicit = original.match(
+    /(?:meu nome (?:e|é)|o nome (?:e|é)|nome(?: de quem vai receber)?\s*[:=-]?|quem vai receber(?: e| é)?)\s*([A-Za-zÀ-ÖØ-öø-ÿ'’-]+(?:\s+[A-Za-zÀ-ÖØ-öø-ÿ'’-]+){0,5})(?=\s*(?:[,;\n]|\b(?:pix|cartao|cartão|credito|crédito|debito|débito)\b|$))/i,
+  );
+  if (explicit) {
+    const candidate = normalizeCandidate(explicit[1]);
+    if (candidate) return candidate;
+  }
+
+  // Resposta agrupada mais comum: "Rua Cananéia, 12, Evanilda, Pix".
+  // Analisa segmentos separados por vírgula/; e escolhe apenas um trecho que
+  // pareça nome de pessoa, ignorando endereço, número, pagamento e complementos.
+  if (/[;,\n]/.test(original)) {
+    const segments = original.split(/[;,\n]+/).map((part) => part.trim()).filter(Boolean);
+    for (const segment of segments) {
+      const candidate = normalizeCandidate(segment);
+      if (candidate) return candidate;
+    }
+  }
+
+  // Resposta simples contendo somente o nome.
+  return normalizeCandidate(raw);
 }
 
 async function persistDeterministicCustomerNameFromTurn(
@@ -1939,12 +2021,6 @@ async function wasDeliveryFeeAlreadyAnnounced(
       body.includes("taxa de entrega para seu endereco") &&
       String(m?.body ?? "").includes(`R$ ${feeLabel}`);
   });
-}
-
-function isExplicitOrderRejection(text: string): boolean {
-  const t = normalizeStreet(text);
-  return /^(?:nao|não|deixa|deixa assim|mantem|mantém|nao quero|não quero|cancela a alteracao|cancela a alteração|esquece|melhor nao|melhor não)$/.test(t) ||
-    /\b(?:nao confirma|não confirma|nao cancela|não cancela|nao altera|não altera|mantem como esta|mantém como está)\b/.test(t);
 }
 
 function isExplicitPendingActionConfirmation(text: string): boolean {
@@ -5107,6 +5183,25 @@ async function handleIncomingMessageUnlocked(
     console.warn("[ORDER_MEMORY] Falha ao persistir item/quantidade:", err);
   }
 
+  // ============ PRÉ-CAPTURA DA COLETA AGRUPADA ============
+  // Quando a pergunta pede endereço + nome + pagamento na mesma mensagem,
+  // salvamos nome e pagamento ANTES do cálculo do frete. O fluxo de frete pode
+  // retornar nesta mesma rodada após o popup; sem esta pré-captura, esses dados
+  // poderiam ser esquecidos e perguntados de novo no turno seguinte.
+  try {
+    await persistDeterministicCustomerNameFromTurn(supabaseAdmin, conversation.id, text, history, draft);
+  } catch (err) {
+    console.warn("[ORDER_MEMORY] Falha na pré-captura de nome:", err);
+  }
+  try {
+    const groupedPayment = inferPaymentFromCustomerTurn(text, history, draft);
+    if (groupedPayment && !draft.payment_method) {
+      await persistDeterministicPayment(supabaseAdmin, conversation.id, draft, groupedPayment);
+    }
+  } catch (err) {
+    console.warn("[ORDER_MEMORY] Falha na pré-captura de pagamento:", err);
+  }
+
   // ============ MEMÓRIA DETERMINÍSTICA DE ENDEREÇO + FRETE ============
   // "Av Brasil 324" já contém rua + número. Captura os dois e, quando isso
   // completa o endereço com o bairro já validado, calcula IMEDIATAMENTE a taxa,
@@ -5164,8 +5259,35 @@ async function handleIncomingMessageUnlocked(
         );
       }
 
-      // A taxa e a próxima pergunta são mensagens independentes. Isso mantém
-      // a conversa legível no WhatsApp e evita blocos de texto embolados.
+      // Se endereço + nome + pagamento vieram todos na mesma resposta, não
+      // desperdiçamos outra rodada perguntando dados já recebidos. Com a taxa
+      // aprovada, avançamos imediatamente para a etapa de bebida/resumo.
+      const readyAfterFreight = Boolean(
+        draft.customer_name && draft.payment_method && draft.delivery_mode && (draft.items ?? []).length &&
+        draft.address_street && draft.address_number && draft.address_neighborhood && draft.estimated_delivery_fee != null,
+      );
+
+      if (readyAfterFreight && !draft.awaiting_final_confirmation) {
+        const fastFlowFlags: { silenced?: boolean; sendMenuImage?: boolean } = {};
+        const fastFlow = await executeTool("finalize_order", {}, {
+          supabaseAdmin,
+          conversation,
+          draft,
+          flags: fastFlowFlags,
+          finalConfirmationAllowed: false,
+          bairrosAtendidos,
+          bairrosNaoAtendidos,
+          ruasNaoAtendidas,
+          currentUserText: text,
+        });
+        const fastStatus = String(fastFlow.result?.status ?? "");
+        if (fastFlowFlags.silenced || ["beverage_offer_sent", "final_confirmation_summary_sent", "awaiting_final_confirmation"].includes(fastStatus)) {
+          return Response.json({ ok: true, action: fastStatus || "freight_confirmed_fast_flow" });
+        }
+      }
+
+      // Se ainda faltou algum dado, pede SOMENTE o que falta. O fallback conhece
+      // tudo que já está persistido e jamais repete endereço/nome/pagamento já recebidos.
       const nextStep = buildContinuityFallback(draft);
       if (!/taxa de entrega|s[oó] um instante/i.test(nextStep)) {
         await replyAndLog(
