@@ -4937,10 +4937,20 @@ async function handleIncomingMessageUnlocked(
   // cumprimentar conforme o horário e pedir o bairro. Como esta trava roda em
   // código antes da classificação de bairro e antes da IA, nenhum prompt ou
   // origem da conversa consegue pular essa etapa.
+  //
+  // ⚠️ IMPORTANTE: a saudação de primeiro contato NÃO pode ser gravada com
+  // systemMessage:true. Mensagens com media_type="system" são FILTRADAS do
+  // histórico usado pelo código (linha ~4915 acima). Se for "system", no
+  // próximo webhook assistantTurnsBeforeThisContact volta a ser 0 e o sistema
+  // pede o bairro de novo em loop infinito — esse era o bug exato exibido na
+  // screenshot (3x Vila São Luís → 3x "informe seu bairro").
+  // A saudação deve entrar no histórico normalmente (sem flag system) para que
+  // o contador de turnos do assistente avance e o loop não se repita.
   const assistantTurnsBeforeThisContact = history.filter((m) => m.role === "assistant").length;
   if (assistantTurnsBeforeThisContact === 0) {
     const greetingText = `${greetingByTimeBR()}! Para que o atendente possa dar continuidade no seu atendimento, informe seu bairro por favor.`;
-    await replyAndLog(supabaseAdmin, conversation.id, phone, greetingText, { systemMessage: true });
+    // SEM systemMessage:true — deve aparecer no histórico para o loop não se repetir
+    await replyAndLog(supabaseAdmin, conversation.id, phone, greetingText);
     return Response.json({ ok: true, action: "first_contact_neighborhood_required" });
   }
 
