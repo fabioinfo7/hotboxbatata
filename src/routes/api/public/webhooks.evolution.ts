@@ -2496,6 +2496,24 @@ function isBeverageDecline(text: string): boolean {
   return /^(nao|não|nao obrigado|não obrigado|nao obrigada|não obrigada|sem bebida|sem refrigerante|so isso|só isso|pode fechar|pode seguir)$/.test(t);
 }
 
+function isBeverageAccept(text: string): boolean {
+  const t = normalizeStreet(text).replace(/[.!?]/g, " ").replace(/\s+/g, " ").trim();
+  if (!t || isBeverageDecline(t)) return false;
+  return /^(sim|s|quero|pode|pode sim|sim por favor|quero sim)(\b|$)/.test(t) ||
+    /\b(coloca|coloque|adiciona|adicione|manda|mande|quero|pode colocar|pode adicionar|inclui|inclua)\b/.test(t) ||
+    /^\d+\s*(por favor)?$/.test(t);
+}
+
+function beverageQuantityFromText(text: string): number {
+  const t = normalizeStreet(text);
+  const numeric = t.match(/\b(\d{1,2})\b/);
+  if (numeric) return Math.max(1, Math.min(20, Number(numeric[1])));
+  if (/\b(duas|dois)\b/.test(t)) return 2;
+  if (/\b(tres|três)\b/.test(t)) return 3;
+  if (/\b(quatro)\b/.test(t)) return 4;
+  return 1;
+}
+
 function isBeverageOfferMessage(text: string): boolean {
   const t = normalizeStreet(text);
   return /(algo pra beber|algo para beber|alguma bebida|gostaria de acrescentar algo para beber|quer.*bebida|quer.*refrigerante)/.test(t);
@@ -4095,13 +4113,95 @@ async function runConversationalTurn(opts: {
     }
   }
 
-  // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
-  // disser que não quer bebida, o backend gera imediatamente o resumo oficial
-  // com TOTAL e pede a única confirmação final.
+  // Resposta à oferta de bebida precisa ser tratada deterministicamente.
+  // As ofertas são gravadas como systemMessage e podem não aparecer no histórico
+  // filtrado da IA; por isso consultamos também as mensagens reais persistidas.
   const previousAssistantText = lastUserIndex > 0
     ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
     : "";
-  if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
+  let beverageOfferContext = isBeverageOfferMessage(previousAssistantText);
+  if (!beverageOfferContext && !opts.forceNoTools) {
+    const { data: recentDrinkContext } = await opts.supabaseAdmin
+      .from("whatsapp_messages")
+      .select("direction,body,created_at")
+      .eq("conversation_id", opts.conversation.id)
+      .not("body", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(8);
+    const rows = recentDrinkContext ?? [];
+    const latestInboundIdx = rows.findIndex((m: any) => m.direction === "in");
+    const olderRows = latestInboundIdx >= 0 ? rows.slice(latestInboundIdx + 1) : rows;
+    beverageOfferContext = olderRows.some((m: any) => m.direction === "out" && isBeverageOfferMessage(String(m.body ?? "")));
+  }
+
+  // Se o cliente aceitou a bebida (ex.: "sim", "coloque 1", "pode adicionar"),
+  // adiciona a bebida ANTES de gerar o resumo. Assim o item e o total nunca
+  // ficam de fora do fechamento. Quando há uma única bebida ativa, "sim" vale 1.
+  if (!opts.forceNoTools && beverageOfferContext && isBeverageAccept(lastUserText)) {
+    const { data: beverageProducts } = await opts.supabaseAdmin
+      .from("products")
+      .select("id,name,category,sale_price,promotion_active,promotion_price,promotion_type,promotion_start_at,promotion_end_at,promotion_days_of_week,promotion_time_start,promotion_time_end,promotion_label")
+      .eq("active", true)
+      .order("name");
+    const drinks = (beverageProducts ?? []).filter((p: any) => {
+      const hay = normalizeStreet(`${p.category ?? ""} ${p.name ?? ""}`);
+      return /\b(bebida|bebidas|refrigerante|refrigerantes|guarana|coca|agua|suco)\b/.test(hay);
+    });
+
+    if (drinks.length) {
+      const normalizedUser = normalizeStreet(lastUserText);
+      let chosen = drinks.find((p: any) => normalizedUser.includes(normalizeStreet(String(p.name ?? ""))));
+      if (!chosen && drinks.length === 1) chosen = drinks[0];
+      if (!chosen) {
+        const options = drinks.slice(0, 8).map((p: any) => p.name).join(", ");
+        return {
+          silenced: false,
+          finalText: `Claro! Qual bebida você prefere? Temos: ${options}.`,
+          pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
+        };
+      }
+
+      const quantity = beverageQuantityFromText(lastUserText);
+      const currentItems = normalizeDraftItems(opts.draft.items ?? []);
+      const chosenName = String(chosen.name);
+      const existingIndex = currentItems.findIndex((item: any) => normalizeStreet(item.product_name) === normalizeStreet(chosenName));
+      const nextItems = currentItems.map((item: any) => ({ ...item }));
+      if (existingIndex >= 0) nextItems[existingIndex].quantity = Number(nextItems[existingIndex].quantity || 0) + quantity;
+      else nextItems.push({ product_name: chosenName, quantity });
+
+      const drinkUpdate = await executeTool("update_order_draft", { items: nextItems }, {
+        supabaseAdmin: opts.supabaseAdmin,
+        conversation: opts.conversation,
+        draft: opts.draft,
+        flags,
+        finalConfirmationAllowed: false,
+        bairrosAtendidos: opts.bairrosAtendidos,
+        bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
+        ruasNaoAtendidas: opts.ruasNaoAtendidas,
+        currentUserText: lastUserText,
+      });
+      const drinkStatus = String(drinkUpdate.result?.status ?? "");
+      if (flags.silenced || drinkStatus === "final_confirmation_summary_sent") {
+        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
+      }
+      // Se por qualquer motivo a atualização não disparou o resumo automaticamente,
+      // finaliza deterministicamente nesta mesma rodada.
+      const directSummary = await executeTool("finalize_order", {}, {
+        supabaseAdmin: opts.supabaseAdmin, conversation: opts.conversation, draft: opts.draft, flags,
+        finalConfirmationAllowed: false, bairrosAtendidos: opts.bairrosAtendidos,
+        bairrosNaoAtendidos: opts.bairrosNaoAtendidos, ruasNaoAtendidas: opts.ruasNaoAtendidas,
+        currentUserText: lastUserText,
+      });
+      if (flags.silenced || ["final_confirmation_summary_sent", "awaiting_final_confirmation"].includes(String(directSummary.result?.status ?? ""))) {
+        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
+      }
+    }
+  }
+
+  // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
+  // disser que não quer bebida, o backend gera imediatamente o resumo oficial
+  // com TOTAL e pede a única confirmação final.
+  if (!opts.forceNoTools && beverageOfferContext && isBeverageDecline(lastUserText)) {
     const directSummary = await executeTool("finalize_order", {}, {
       supabaseAdmin: opts.supabaseAdmin,
       conversation: opts.conversation,
