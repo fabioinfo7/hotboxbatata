@@ -350,6 +350,33 @@ async function replyAndLog(
   text: string,
   opts?: { systemMessage?: boolean },
 ) {
+  // Guarda final contra resposta atrasada/concorrente de pagamento.
+  // Mesmo que uma rodada antiga tenha montado a pergunta "Qual será a forma de
+  // pagamento?", ela NÃO pode ser enviada se outra rodada já persistiu Pix/cartão
+  // no rascunho. Isso elimina o loop observado: cliente responde "Pix" e ainda
+  // recebe a mesma pergunta novamente antes da oferta de bebida.
+  const normalizedOutgoing = normalizeStreet(String(text ?? ""));
+  const looksLikePaymentQuestion =
+    /(?:qual|informe|informar|diga|dizer).{0,45}(?:forma|metodo).{0,25}pagamento|qual sera a forma de pagamento/.test(normalizedOutgoing);
+
+  if (looksLikePaymentQuestion) {
+    try {
+      const { data: freshDraft } = await supabaseAdmin
+        .from("order_drafts")
+        .select("payment_method")
+        .eq("conversation_id", conversationId)
+        .maybeSingle();
+      if (freshDraft?.payment_method === "pix" || freshDraft?.payment_method === "card") {
+        console.log("[PAYMENT_GUARD] pergunta de pagamento suprimida: método já persistido", freshDraft.payment_method);
+        return;
+      }
+    } catch (err) {
+      // A proteção não pode derrubar o atendimento se houver falha temporária
+      // na consulta. O fluxo normal continua.
+      console.warn("[PAYMENT_GUARD] falha ao conferir pagamento já persistido:", err);
+    }
+  }
+
   const externalId = await sendWhatsappReply(phone, text);
   // Mensagens automáticas do sistema (comprovante do pedido, chave Pix, fallback)
   // são marcadas com media_type "system": aparecem normal no chat do painel, mas
