@@ -3951,13 +3951,64 @@ async function runConversationalTurn(opts: {
     }
   }
 
-  // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
-  // disser que não quer bebida, o backend gera imediatamente o resumo oficial
-  // com TOTAL e pede a única confirmação final.
+  // Resposta negativa à oferta de bebida: não depende da IA. A oferta de bebida
+  // é enviada com systemMessage:true e, por projeto, mensagens "system" ficam
+  // fora de opts.history. Por isso NÃO podemos depender apenas de
+  // previousAssistantText para saber que o "Não" atual responde à bebida.
+  // Consultamos as mensagens persistidas da conversa (incluindo system) e
+  // verificamos se a última saída imediatamente anterior à última entrada foi
+  // uma oferta de bebida. Assim o backend envia o resumo NA MESMA rodada, sem
+  // deixar a IA responder "vou preparar o resumo" e sem criar um beco sem saída.
   const previousAssistantText = lastUserIndex > 0
     ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
     : "";
-  if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
+
+  let currentUserIsReplyToPersistedBeverageOffer = false;
+  if (!opts.forceNoTools && isBeverageDecline(lastUserText)) {
+    try {
+      const { data: recentBeverageFlow } = await opts.supabaseAdmin
+        .from("whatsapp_messages")
+        .select("direction,body,created_at")
+        .eq("conversation_id", opts.conversation.id)
+        .not("body", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(20);
+
+      const chronological = (recentBeverageFlow ?? []).reverse();
+      let latestInboundIndex = -1;
+      for (let i = chronological.length - 1; i >= 0; i--) {
+        if ((chronological[i] as any)?.direction === "in") {
+          latestInboundIndex = i;
+          break;
+        }
+      }
+
+      if (latestInboundIndex > 0) {
+        let previousOutboundIndex = -1;
+        for (let i = latestInboundIndex - 1; i >= 0; i--) {
+          // Se houve outra fala do cliente depois da oferta, o "Não" atual já
+          // não é considerado automaticamente resposta à bebida.
+          if ((chronological[i] as any)?.direction === "in") break;
+          if ((chronological[i] as any)?.direction === "out") {
+            previousOutboundIndex = i;
+            break;
+          }
+        }
+        if (previousOutboundIndex >= 0) {
+          currentUserIsReplyToPersistedBeverageOffer = isBeverageOfferMessage(
+            String((chronological[previousOutboundIndex] as any)?.body ?? ""),
+          );
+        }
+      }
+    } catch (err) {
+      console.warn("[BEVERAGE_FLOW] Falha ao consultar oferta persistida de bebida:", err);
+    }
+  }
+
+  const currentUserIsReplyToBeverageOffer =
+    isBeverageOfferMessage(previousAssistantText) || currentUserIsReplyToPersistedBeverageOffer;
+
+  if (!opts.forceNoTools && currentUserIsReplyToBeverageOffer && isBeverageDecline(lastUserText)) {
     const directSummary = await executeTool("finalize_order", {}, {
       supabaseAdmin: opts.supabaseAdmin,
       conversation: opts.conversation,
@@ -3973,6 +4024,29 @@ async function runConversationalTurn(opts: {
       return {
         silenced: true,
         finalText: "",
+        pixBlock: null,
+        pixKeyLabel: null,
+        pixKeyMessage: null,
+        sendMenuImage: false,
+      };
+    }
+
+    // Mesmo se houver uma inconsistência de estado, não devolva o "Não" para
+    // a IA gerar uma promessa sem ação. Continue de forma determinística.
+    if (directSummary.result?.status === "missing_fields") {
+      return {
+        silenced: false,
+        finalText: buildContinuityFallback(opts.draft),
+        pixBlock: null,
+        pixKeyLabel: null,
+        pixKeyMessage: null,
+        sendMenuImage: false,
+      };
+    }
+    if (directSummary.result?.status === "awaiting_final_confirmation") {
+      return {
+        silenced: false,
+        finalText: "Fico aguardando sua confirmação para fechar o pedido.",
         pixBlock: null,
         pixKeyLabel: null,
         pixKeyMessage: null,
@@ -5624,14 +5698,53 @@ async function handleIncomingMessageUnlocked(
     outOfAreaLinksText,
   });
 
-  // Gerente recusou a taxa de entrega calculada: a conversa passou pro modo
-  // manual e a IA não manda nada — quem responde agora é a loja.
+  // Gerente recusou a taxa de entrega calculada OU uma ferramenta determinística
+  // (ex.: oferta de bebida/resumo oficial) já respondeu diretamente ao cliente.
+  // Nesses casos a IA não deve acrescentar outro texto na mesma rodada.
   if (silenced) {
-    return Response.json({ ok: true, action: "freight_manual_takeover" });
+    return Response.json({ ok: true, action: "deterministic_flow_response_sent" });
   }
 
-  if (finalText) {
-    await replyAndLog(supabaseAdmin, conversation.id, phone, finalText);
+  // ÚLTIMA BARREIRA CONTRA PROMESSA SEM AÇÃO:
+  // nenhuma frase como "vou preparar o resumo" pode sair para o cliente. Se, por
+  // qualquer motivo, o modelo ainda devolver uma promessa desse tipo, o handler
+  // converte a intenção em finalize_order ANTES do envio. Isso é propositalmente
+  // redundante com a proteção dentro de runConversationalTurn: evita regressão
+  // caso uma mensagem de sistema fique fora do histórico da IA.
+  let outboundText = finalText;
+  if (outboundText && assistantPromisesActionButDoesNothing(outboundText) && !forceNoTools) {
+    const deterministicFlags: { silenced?: boolean; sendMenuImage?: boolean } = {};
+    const deterministicClose = await executeTool("finalize_order", {}, {
+      supabaseAdmin,
+      conversation,
+      draft,
+      flags: deterministicFlags,
+      finalConfirmationAllowed: false,
+      bairrosAtendidos,
+      bairrosNaoAtendidos,
+      ruasNaoAtendidas,
+      currentUserText: text,
+    });
+    const deterministicStatus = String(deterministicClose.result?.status ?? "");
+    if (
+      deterministicFlags.silenced ||
+      ["beverage_offer_sent", "final_confirmation_summary_sent"].includes(deterministicStatus)
+    ) {
+      return Response.json({ ok: true, action: "deterministic_flow_response_sent" });
+    }
+
+    if (deterministicStatus === "missing_fields") {
+      outboundText = buildContinuityFallback(draft);
+    } else if (deterministicStatus === "awaiting_final_confirmation") {
+      outboundText = "Fico aguardando sua confirmação para fechar o pedido.";
+    } else {
+      console.warn("[DETERMINISTIC_CLOSE] Não foi possível avançar o fechamento:", deterministicClose.result);
+      outboundText = "Não consegui montar o resumo automaticamente agora. A equipe vai conferir o pedido para você.";
+    }
+  }
+
+  if (outboundText) {
+    await replyAndLog(supabaseAdmin, conversation.id, phone, outboundText);
   }
   // A imagem do cardápio só é enviada quando a IA chamou a ferramenta
   // send_menu_image nesta rodada (cliente pediu o cardápio ou perguntou
@@ -5655,7 +5768,7 @@ async function handleIncomingMessageUnlocked(
       systemMessage: true,
     });
   }
-  if (!finalText && !pixBlock && !pixKeyLabel && !pixKeyMessage) {
+  if (!outboundText && !pixBlock && !pixKeyLabel && !pixKeyMessage) {
     // PROTEÇÃO DE CONTINUIDADE: mesmo se a IA falhar depois de uma correção,
     // ambiguidade ou sequência de ferramentas, o cliente não fica abandonado.
     // O backend pergunta o próximo dado estrutural que falta no rascunho.
