@@ -6,6 +6,7 @@ import { formatPhone, formatDateTime, ORDER_STATUS_LABEL, orderDisplayRef } from
 import { sendChatText, sendChatMedia, broadcastMessage, deleteConversation, deleteMessage, sendWindowBroadcast } from "@/lib/chat.functions";
 import { generateOrderFromConversation } from "@/lib/generate-order-from-chat.functions";
 import { sendSatisfactionRequestFn } from "@/lib/satisfaction.functions";
+import { sendOrderArrivalNoticeFn } from "@/lib/order-notifications.functions";
 import { EmojiPicker } from "@/components/emoji-picker";
 import wallpaperTeal from "@/assets/wallpapers/wallpaper-teal.jpg";
 import wallpaperBeige from "@/assets/wallpapers/wallpaper-beige.jpg";
@@ -15,6 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
   Send,
   Paperclip,
@@ -43,6 +45,15 @@ import {
   ImagePlus,
   ThumbsUp,
   Package,
+  MapPin,
+  MoreHorizontal,
+  AlertTriangle,
+  Eye,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Navigation,
+  UserRoundCheck,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -92,6 +103,15 @@ type ActiveOrder = {
   order_number: number | null; external_display_id: string | null; total: number | null;
   address_street: string | null; address_number: string | null; address_complement: string | null;
   address_neighborhood: string | null; address_city: string | null;
+  payment_method?: string | null; delivery_fee?: number | null; notes?: string | null;
+  payment_status?: string | null; payment_timing?: string | null;
+  assigned_operator_id?: string | null; assigned_operator_email?: string | null; assigned_operator_at?: string | null;
+};
+
+type GenerateOrderReview = {
+  missing: string[];
+  missingKeys: string[];
+  extracted: any;
 };
 
 /**
@@ -145,6 +165,8 @@ function ChatPage() {
   const [deliveryMinutes, setDeliveryMinutes] = useState(60);
   const [sideTab, setSideTab] = useState<"quick" | "orders">("quick");
   const [timerNow, setTimerNow] = useState(Date.now());
+  const [currentOperator, setCurrentOperator] = useState<{ id: string; email: string | null } | null>(null);
+  const [orderItemsByOrder, setOrderItemsByOrder] = useState<Record<string, any[]>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [q, setQ] = useState("");
@@ -153,6 +175,8 @@ function ChatPage() {
   const [dialogMode, setDialogMode] = useState<DialogMode>(null);
   const [recording, setRecording] = useState(false);
   const [generatingOrder, setGeneratingOrder] = useState(false);
+  const [generateReview, setGenerateReview] = useState<GenerateOrderReview | null>(null);
+  const [generateManual, setGenerateManual] = useState<Record<string, string>>({});
   const [showWindowBroadcast, setShowWindowBroadcast] = useState(false);
   const [windowContacts, setWindowContacts]   = useState<{id:string;phone:string;name:string|null;last_message_at:string}[]>([]);
   const [wbSelected, setWbSelected]           = useState<Set<string>>(new Set());
@@ -254,15 +278,27 @@ function ChatPage() {
     const [{ data: convData }, { data: leadsData }, { data: ordersData }, { data: cfgData }] = await Promise.all([
       supabase.from("whatsapp_conversations").select("*").order("last_message_at", { ascending: false }),
       supabase.from("leads").select("phone,tags"),
-      supabase.from("orders")
-        .select("id,customer_phone,customer_name,status,created_at,order_number,external_display_id,total,address_street,address_number,address_complement,address_neighborhood,address_city")
+      (supabase as any).from("orders")
+        .select("id,customer_phone,customer_name,status,created_at,order_number,external_display_id,total,address_street,address_number,address_complement,address_neighborhood,address_city,payment_method,delivery_fee,notes,payment_status,payment_timing,assigned_operator_id,assigned_operator_email,assigned_operator_at")
         .in("status", ["pending_review", "pending", "preparing", "ready_pickup", "out_for_delivery"])
         .order("created_at", { ascending: true }),
       (supabase as any).from("store_config").select("estimated_delivery_time_minutes").eq("id", 1).maybeSingle(),
     ]);
     const rows = (convData as Conversation[]) ?? [];
     setConversations(rows);
-    setActiveOrders((ordersData as ActiveOrder[]) ?? []);
+    const active = (ordersData as ActiveOrder[]) ?? [];
+    setActiveOrders(active);
+    if (active.length) {
+      const { data: activeItems } = await supabase
+        .from("order_items")
+        .select("id,order_id,product_name,quantity,unit_price")
+        .in("order_id", active.map((o) => o.id));
+      const grouped: Record<string, any[]> = {};
+      for (const item of activeItems ?? []) (grouped[(item as any).order_id] ||= []).push(item);
+      setOrderItemsByOrder(grouped);
+    } else {
+      setOrderItemsByOrder({});
+    }
     setDeliveryMinutes(Number((cfgData as any)?.estimated_delivery_time_minutes) || 60);
     await loadContactSatisfactionStatuses(rows);
     const map = new Map<string, string[]>();
@@ -301,6 +337,10 @@ function ChatPage() {
 
   useEffect(() => {
     const timer = window.setInterval(() => setTimerNow(Date.now()), 1000);
+    supabase.auth.getUser().then(({ data }) => {
+      const u = data.user;
+      setCurrentOperator(u ? { id: u.id, email: u.email ?? null } : null);
+    });
     loadConversations();
     loadRepeatCustomers();
     loadWallpaper();
@@ -425,13 +465,24 @@ function ChatPage() {
     () => new Set(activeOrders.map((o) => String(o.customer_phone || "").replace(/\D/g, ""))),
     [activeOrders],
   );
+  const unreadPhones = useMemo(
+    () => new Set(
+      conversations
+        .filter((c) => Number(c.unread_count || 0) > 0)
+        .map((c) => String(c.phone || "").replace(/\D/g, "")),
+    ),
+    [conversations],
+  );
 
   const filtered = useMemo(() => {
     const available = conversations.filter((c) => !activePhones.has(c.phone.replace(/\D/g, "")));
     if (!q) return available;
     const s = q.toLowerCase();
     return available.filter(
-      (c) => (c.customer_name ?? "").toLowerCase().includes(s) || c.phone.includes(q.replace(/\D/g, "")),
+      (c) =>
+        (c.customer_name ?? "").toLowerCase().includes(s) ||
+        c.phone.includes(q.replace(/\D/g, "")) ||
+        (c.last_message_preview ?? "").toLowerCase().includes(s),
     );
   }, [conversations, q, activePhones]);
 
@@ -528,13 +579,36 @@ function ChatPage() {
     await supabase.from("whatsapp_conversations").update({ bot_paused: v }).eq("id", selected.id);
   }
 
-  async function handleGenerateOrder() {
+  function primeManualFromExtraction(extracted: any) {
+    setGenerateManual({
+      customer_name: extracted?.customer_name ?? "",
+      delivery_mode: extracted?.delivery_mode ?? "",
+      address_street: extracted?.address_street ?? "",
+      address_number: extracted?.address_number ?? "",
+      address_complement: extracted?.address_complement ?? "",
+      address_neighborhood: extracted?.address_neighborhood ?? "",
+      address_reference: extracted?.address_reference ?? "",
+      payment_method: extracted?.payment_method ?? "",
+      items_text: Array.isArray(extracted?.items)
+        ? extracted.items.map((i: any) => `${Math.max(1, Number(i.quantity) || 1)}x ${i.product_name}`).join("\n")
+        : "",
+      notes: extracted?.notes ?? "",
+    });
+  }
+
+  async function runGenerateOrder(overrides?: Record<string, string>) {
     if (!selected || generatingOrder) return;
     setGeneratingOrder(true);
     try {
-      const result = await generateOrderFromConversation({ data: { conversationId: selected.id } });
+      const cleanOverrides = overrides
+        ? Object.fromEntries(Object.entries(overrides).filter(([, v]) => String(v ?? "").trim()))
+        : undefined;
+      const result: any = await generateOrderFromConversation({
+        data: { conversationId: selected.id, overrides: cleanOverrides as any },
+      });
       switch (result.status) {
         case "ok":
+          setGenerateReview(null);
           toast.success(`Pedido #${result.order_number} gerado com sucesso!`, {
             action: {
               label: "Ver pedido",
@@ -543,7 +617,12 @@ function ChatPage() {
           });
           break;
         case "missing_fields":
-          toast.error(`Faltou confirmar na conversa: ${result.missing?.join(", ")}`);
+          primeManualFromExtraction(result.extracted);
+          setGenerateReview({
+            missing: result.missing ?? [],
+            missingKeys: result.missingKeys ?? [],
+            extracted: result.extracted ?? {},
+          });
           break;
         case "unmatched_products": {
           const hint = (result.suggestions ?? [])
@@ -551,7 +630,7 @@ function ChatPage() {
             .map((s: any) => `"${s.raw}" → ${s.closest.join(" ou ")}`)
             .join("; ");
           toast.error(
-            `Não encontrei no cardápio: ${result.items?.join(", ")}.${hint ? ` Você quis dizer: ${hint}?` : " Confira o nome exato do produto."}`,
+            `Não encontrei no cardápio: ${result.items?.join(", ")}.${hint ? ` Você quis dizer: ${hint}?` : " Confira o nome do produto."}`,
           );
           break;
         }
@@ -577,6 +656,48 @@ function ChatPage() {
     }
   }
 
+  async function handleGenerateOrder() {
+    await runGenerateOrder();
+  }
+
+  async function claimOrderAndConversation(order: ActiveOrder, conversationId?: string | null) {
+    if (!currentOperator) return;
+    try {
+      await Promise.all([
+        (supabase as any).from("orders").update({
+          assigned_operator_id: currentOperator.id,
+          assigned_operator_email: currentOperator.email,
+          assigned_operator_at: new Date().toISOString(),
+        }).eq("id", order.id),
+        conversationId
+          ? (supabase as any).from("whatsapp_conversations").update({
+              assigned_operator_id: currentOperator.id,
+              assigned_operator_email: currentOperator.email,
+              assigned_operator_at: new Date().toISOString(),
+            }).eq("id", conversationId)
+          : Promise.resolve(),
+      ]);
+    } catch (err) {
+      console.warn("[chat] não foi possível registrar operador responsável", err);
+    }
+  }
+
+  async function openChatFromOrder(order: ActiveOrder) {
+    const digits = String(order.customer_phone || "").replace(/\D/g, "");
+    let conv = conversations.find((c) => c.phone.replace(/\D/g, "") === digits) ?? null;
+    try {
+      if (!conv) {
+        conv = await getOrCreateConversationByPhone(order.customer_phone, order.customer_name);
+        await loadConversations();
+      }
+      await claimOrderAndConversation(order, conv.id);
+      setSelectedId(conv.id);
+      setSideTab("orders");
+    } catch (err: any) {
+      toast.error("Não foi possível abrir o chat: " + String(err?.message ?? err));
+    }
+  }
+
   // agrupa mensagens por data pra mostrar separadores de dia
   const grouped = useMemo(() => {
     const result: { date: string; msgs: Message[] }[] = [];
@@ -591,6 +712,8 @@ function ChatPage() {
     }
     return result;
   }, [messages]);
+
+  const selectedPhoneDigits = selected ? String(selected.phone || "").replace(/\D/g, "") : "";
 
   const today = new Date().toLocaleDateString("pt-BR");
   const yesterday = new Date(Date.now() - 86400000).toLocaleDateString("pt-BR");
@@ -654,7 +777,7 @@ function ChatPage() {
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
               className="h-8 rounded-full border-0 bg-muted pl-8 text-sm focus-visible:ring-1"
-              placeholder="Buscar conversa..."
+              placeholder="Buscar cliente, telefone, pedido ou endereço..."
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -1090,7 +1213,7 @@ function ChatPage() {
             onClick={() => setSideTab("orders")}
             className={`rounded-lg px-2 py-2 text-xs font-bold ${sideTab === "orders" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
           >
-            <Package className="mr-1 inline size-3.5" /> Pedidos {activeOrders.length ? `(${activeOrders.length})` : ""}
+            <Package className="mr-1 inline size-3.5" /> Pedidos {activeOrders.length ? `(${activeOrders.length})` : ""}{unreadPhones.size ? ` · 💬 ${unreadPhones.size}` : ""}
           </button>
         </div>
         {sideTab === "quick" ? (
@@ -1130,9 +1253,105 @@ function ChatPage() {
               else { toast.success("Pedido cancelado"); loadConversations(); }
             }}
             onOpenOrder={(id) => navigate({ to: "/loja/pedido/$id", params: { id } })}
+            onOpenChat={openChatFromOrder}
+            unreadPhones={unreadPhones}
+            conversations={conversations}
+            orderItemsByOrder={orderItemsByOrder}
+            searchQuery={q}
+            selectedPhone={selectedPhoneDigits}
+            currentOperator={currentOperator}
           />
         )}
       </div>
+
+      <Dialog open={!!generateReview} onOpenChange={(open) => !open && setGenerateReview(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Completar dados do pedido</DialogTitle>
+          </DialogHeader>
+          {generateReview && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-semibold">A IA encontrou parte do pedido, mas ainda faltam dados para gerar com segurança.</p>
+                <p className="mt-1">Faltando: <span className="font-bold">{generateReview.missing.join(", ")}</span>.</p>
+              </div>
+
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                <p className="font-semibold">Dados encontrados com segurança</p>
+                <div className="mt-2 grid gap-1 text-xs sm:grid-cols-2">
+                  {generateManual.customer_name && <span>✅ Nome: <strong>{generateManual.customer_name}</strong></span>}
+                  {generateManual.delivery_mode && <span>✅ Tipo: <strong>{generateManual.delivery_mode === "pickup" ? "Retirada" : "Entrega"}</strong></span>}
+                  {generateManual.address_street && <span>✅ Rua: <strong>{generateManual.address_street}</strong></span>}
+                  {generateManual.address_number && <span>✅ Número: <strong>{generateManual.address_number}</strong></span>}
+                  {generateManual.address_neighborhood && <span>✅ Bairro: <strong>{generateManual.address_neighborhood}</strong></span>}
+                  {generateManual.payment_method && <span>✅ Pagamento: <strong>{generateManual.payment_method === "pix" ? "Pix" : "Cartão"}</strong></span>}
+                  {generateManual.items_text && <span className="sm:col-span-2">✅ Itens identificados</span>}
+                </div>
+                <p className="mt-2 text-[11px] text-emerald-800/80">Dados críticos não são inventados: quando houver dúvida, o campo permanece pendente para você confirmar.</p>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold">Nome do cliente</label>
+                  <Input value={generateManual.customer_name ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, customer_name: e.target.value }))} placeholder="Nome de quem vai receber" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold">Entrega ou retirada</label>
+                  <select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={generateManual.delivery_mode ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, delivery_mode: e.target.value }))}>
+                    <option value="">Selecione</option>
+                    <option value="delivery">Entrega</option>
+                    <option value="pickup">Retirada no local</option>
+                  </select>
+                </div>
+                {generateManual.delivery_mode !== "pickup" && (
+                  <>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold">Rua</label>
+                      <Input value={generateManual.address_street ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, address_street: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold">Número</label>
+                      <Input value={generateManual.address_number ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, address_number: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold">Bairro</label>
+                      <Input value={generateManual.address_neighborhood ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, address_neighborhood: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold">Complemento / referência</label>
+                      <Input value={generateManual.address_complement ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, address_complement: e.target.value }))} />
+                    </div>
+                  </>
+                )}
+                <div>
+                  <label className="mb-1 block text-xs font-semibold">Forma de pagamento</label>
+                  <select className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={generateManual.payment_method ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, payment_method: e.target.value }))}>
+                    <option value="">Selecione</option>
+                    <option value="pix">Pix</option>
+                    <option value="card">Cartão</option>
+                  </select>
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs font-semibold">Itens do pedido</label>
+                  <Textarea rows={3} value={generateManual.items_text ?? ""} onChange={(e) => setGenerateManual((p) => ({ ...p, items_text: e.target.value }))} placeholder={"Ex.:\n1x COSTELA DESFIADA\n1x GUARANÁ ANTARCTICA LATA 350 ML"} />
+                  <p className="mt-1 text-[11px] text-muted-foreground">Use uma linha por item. A IA ainda confere o nome com o cardápio real antes de criar.</p>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
+                Você pode preencher manualmente o que falta e gerar agora, ou fechar esta janela, perguntar ao cliente e clicar em <strong>Gerar pedido com IA</strong> novamente depois.
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setGenerateReview(null)} disabled={generatingOrder}>Vou perguntar ao cliente</Button>
+            <Button onClick={() => runGenerateOrder(generateManual)} disabled={generatingOrder}>
+              {generatingOrder ? <Loader2 className="size-4 animate-spin" /> : <PackagePlus className="size-4" />}
+              Preencher manualmente e gerar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ChatDialogs
         mode={dialogMode}
@@ -1892,77 +2111,170 @@ type QuickReply = {
   image_url: string | null;
 };
 
-function ActiveOrdersPanel({ orders, deliveryMinutes, now, onUpdateStatus, onCancelOrder, onOpenOrder }: {
+function ActiveOrdersPanel({ orders, deliveryMinutes, now, onUpdateStatus, onCancelOrder, onOpenOrder, onOpenChat, unreadPhones, conversations, orderItemsByOrder, searchQuery, selectedPhone, currentOperator }: {
   orders: ActiveOrder[]; deliveryMinutes: number; now: number;
   onUpdateStatus: (id: string, status: "ready_pickup" | "out_for_delivery") => void;
   onCancelOrder: (id: string) => void; onOpenOrder: (id: string) => void;
+  onOpenChat: (order: ActiveOrder) => void; unreadPhones: Set<string>;
+  conversations: Conversation[]; orderItemsByOrder: Record<string, any[]>; searchQuery: string;
+  selectedPhone: string; currentOperator: { id: string; email: string | null } | null;
 }) {
-  const formatTimer = (createdAt: string) => {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [sendingArrivalId, setSendingArrivalId] = useState<string | null>(null);
+  const conversationByPhone = useMemo(() => {
+    const map = new Map<string, Conversation>();
+    for (const c of conversations) map.set(String(c.phone || "").replace(/\D/g, ""), c);
+    return map;
+  }, [conversations]);
+
+  const timerFor = (createdAt: string) => {
     const remaining = deliveryMinutes * 60 - Math.floor((now - new Date(createdAt).getTime()) / 1000);
     const late = remaining < 0;
     const abs = Math.abs(remaining);
     const h = Math.floor(abs / 3600);
     const m = Math.floor((abs % 3600) / 60);
     const sec = abs % 60;
-    return { late, text: `${late ? "-" : ""}${h ? `${h}:` : ""}${String(m).padStart(h ? 2 : 1, "0")}:${String(sec).padStart(2, "0")}` };
+    return { late, remaining, near: !late && remaining <= 10 * 60, text: `${late ? "-" : ""}${h ? `${h}:` : ""}${String(m).padStart(h ? 2 : 1, "0")}:${String(sec).padStart(2, "0")}` };
+  };
+
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const visibleOrders = useMemo(() => {
+    const filtered = !normalizedQuery ? orders : orders.filter((order) => {
+      const haystack = [
+        order.customer_name, order.customer_phone, order.external_display_id, order.order_number,
+        order.address_street, order.address_number, order.address_neighborhood, order.address_city,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(normalizedQuery) || String(order.customer_phone || "").replace(/\D/g, "").includes(normalizedQuery.replace(/\D/g, ""));
+    });
+    return [...filtered].sort((a, b) => {
+      const pa = String(a.customer_phone || "").replace(/\D/g, "");
+      const pb = String(b.customer_phone || "").replace(/\D/g, "");
+      const ta = timerFor(a.created_at); const tb = timerFor(b.created_at);
+      const score = (o: ActiveOrder, phone: string, t: ReturnType<typeof timerFor>) =>
+        (unreadPhones.has(phone) ? 1000 : 0) + (t.late ? 700 : 0) + (t.near ? 400 : 0) + (o.status === "pending_review" ? 300 : 0) + (phone === selectedPhone ? 200 : 0);
+      const diff = score(b, pb, tb) - score(a, pa, ta);
+      return diff || new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+    });
+  }, [orders, normalizedQuery, unreadPhones, selectedPhone, now, deliveryMinutes]);
+
+  const attention = visibleOrders.filter((o) => {
+    const phone = String(o.customer_phone || "").replace(/\D/g, "");
+    const t = timerFor(o.created_at);
+    return unreadPhones.has(phone) || t.late || t.near || o.status === "pending_review";
+  });
+
+  const copyText = async (value: string, label: string) => {
+    if (!value) return;
+    try { await navigator.clipboard.writeText(value); toast.success(`${label} copiado`); }
+    catch { toast.error(`Não foi possível copiar ${label.toLowerCase()}.`); }
+  };
+
+  const sendArrival = async (order: ActiveOrder) => {
+    if (sendingArrivalId) return;
+    setSendingArrivalId(order.id);
+    try {
+      const result = await sendOrderArrivalNoticeFn({ data: { orderId: order.id } });
+      if (!result.ok) throw new Error(result.error || "Não foi possível avisar o cliente.");
+      toast.success("Cliente avisado pelo WhatsApp");
+    } catch (err: any) { toast.error(err?.message ?? "Falha ao avisar o cliente"); }
+    finally { setSendingArrivalId(null); }
   };
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto bg-muted/20 p-3">
-      {!orders.length ? (
-        <div className="flex flex-col items-center gap-2 p-6 text-center text-xs text-muted-foreground">
-          <Package className="size-8 opacity-40" /> Nenhum pedido em andamento.
+      {attention.length > 0 && (
+        <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-2.5">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="flex items-center gap-1.5 text-xs font-extrabold text-amber-900"><AlertTriangle className="size-3.5" /> Precisa de atenção</p>
+            <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-extrabold text-amber-900">{attention.length}</span>
+          </div>
+          <div className="space-y-1">
+            {attention.slice(0, 4).map((order) => {
+              const phone = String(order.customer_phone || "").replace(/\D/g, "");
+              const t = timerFor(order.created_at);
+              const reason = unreadPhones.has(phone) ? "Nova mensagem" : t.late ? `Atrasado ${t.text}` : t.near ? `Prazo próximo · ${t.text}` : "Aguardando revisão";
+              return <button key={order.id} type="button" onClick={() => onOpenChat(order)} className="flex w-full items-center justify-between rounded-lg bg-white/70 px-2 py-1.5 text-left text-[11px] hover:bg-white"><span className="truncate font-semibold">{order.customer_name || formatPhone(order.customer_phone)}</span><span className="ml-2 shrink-0 text-amber-800">{reason}</span></button>;
+            })}
+          </div>
         </div>
-      ) : orders.map((order) => {
-        const timer = formatTimer(order.created_at);
+      )}
+
+      {!visibleOrders.length ? (
+        <div className="flex flex-col items-center gap-2 p-6 text-center text-xs text-muted-foreground">
+          <Package className="size-8 opacity-40" /> {orders.length ? "Nenhum pedido corresponde à busca." : "Nenhum pedido em andamento."}
+        </div>
+      ) : visibleOrders.map((order) => {
+        const timer = timerFor(order.created_at);
+        const phoneKey = String(order.customer_phone || "").replace(/\D/g, "");
+        const conv = conversationByPhone.get(phoneKey);
+        const hasUnread = unreadPhones.has(phoneKey);
+        const isSelected = selectedPhone === phoneKey;
+        const fullAddress = [order.address_street, order.address_number, order.address_complement, order.address_neighborhood, order.address_city].filter(Boolean).join(", ");
+        const mapUrl = fullAddress ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fullAddress)}` : null;
+        const items = orderItemsByOrder[order.id] ?? [];
+        const isExpanded = expandedId === order.id;
+        const operatorLabel = order.assigned_operator_email || (isSelected && currentOperator?.email) || null;
         return (
-          <div key={order.id} className="mb-2 rounded-xl border border-border/60 bg-card p-3 shadow-sm">
+          <div key={order.id} className={`mb-2 rounded-xl border bg-card p-3 shadow-sm transition ${hasUnread ? "order-card-unread border-emerald-500" : timer.late ? "border-red-400" : timer.near ? "border-amber-400" : isSelected ? "border-blue-400 ring-1 ring-blue-200" : "border-border/60"}`}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <p className="truncate text-sm font-bold">{order.customer_name || formatPhone(order.customer_phone)}</p>
-                <div className="mt-1 flex items-center gap-1.5">
+                <p className="truncate text-sm font-extrabold">{order.customer_name || formatPhone(order.customer_phone)}</p>
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
                   <span className="text-[10px] text-muted-foreground">{orderDisplayRef(order)}</span>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${
-                    order.status === "out_for_delivery" ? "bg-blue-100 text-blue-700" :
-                    order.status === "ready_pickup" ? "bg-emerald-100 text-emerald-700" :
-                    order.status === "preparing" ? "bg-amber-100 text-amber-800" :
-                    "bg-slate-100 text-slate-700"
-                  }`}>
-                    {ORDER_STATUS_LABEL[order.status] || order.status}
-                  </span>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${order.status === "out_for_delivery" ? "bg-blue-100 text-blue-700" : order.status === "ready_pickup" ? "bg-emerald-100 text-emerald-700" : order.status === "preparing" ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700"}`}>{ORDER_STATUS_LABEL[order.status] || order.status}</span>
                 </div>
               </div>
-              <span className={`shrink-0 rounded-full px-2 py-1 font-mono text-xs font-extrabold ${timer.late ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>
-                {timer.text}
-              </span>
+              <div className="flex items-start gap-1">
+                <span className={`shrink-0 rounded-full px-2 py-1 font-mono text-xs font-extrabold ${timer.late ? "bg-red-100 text-red-700" : timer.near ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>{timer.text}</span>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => onOpenOrder(order.id)}><Eye className="mr-2 size-4" /> Ver / editar pedido</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onOpenChat(order)}><MessageCircle className="mr-2 size-4" /> Abrir chat</DropdownMenuItem>
+                    <DropdownMenuItem disabled={!mapUrl} onClick={() => mapUrl && window.open(mapUrl, "_blank", "noopener,noreferrer")}><Navigation className="mr-2 size-4" /> Abrir mapa</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => copyText(fullAddress, "Endereço")} disabled={!fullAddress}><Copy className="mr-2 size-4" /> Copiar endereço</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => copyText(String(order.customer_phone || ""), "Telefone")}><Copy className="mr-2 size-4" /> Copiar telefone</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => onCancelOrder(order.id)}><X className="mr-2 size-4" /> Cancelar pedido</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             </div>
-            {(order.address_street || order.address_neighborhood) && (
-              <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-                {[order.address_street, order.address_number, order.address_complement, order.address_neighborhood, order.address_city].filter(Boolean).join(", ")}
-              </p>
+
+            {operatorLabel && <p className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground"><UserRoundCheck className="size-3" /> Atendimento por {operatorLabel}</p>}
+
+            {hasUnread && (
+              <button type="button" onClick={() => onOpenChat(order)} className="mt-2 block w-full rounded-lg bg-emerald-50 px-2.5 py-2 text-left hover:bg-emerald-100">
+                <span className="flex items-center gap-1.5 text-[11px] font-extrabold text-emerald-700"><MessageCircle className="size-3.5" /> Nova mensagem {conv?.last_message_at ? `· ${formatDateTime(conv.last_message_at)}` : ""}</span>
+                {conv?.last_message_preview && <span className="mt-0.5 block truncate text-[11px] text-emerald-800/80">“{conv.last_message_preview}”</span>}
+              </button>
             )}
-            <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 border-emerald-300 text-[11px] font-bold text-emerald-700"
-                disabled={["ready_pickup", "out_for_delivery"].includes(order.status)}
-                onClick={() => onUpdateStatus(order.id, "ready_pickup")}
-              >
-                Pronto
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 border-blue-300 text-[11px] font-bold text-blue-700"
-                disabled={order.status !== "ready_pickup"}
-                onClick={() => onUpdateStatus(order.id, "out_for_delivery")}
-              >
-                Saiu para entrega
-              </Button>
-              <Button size="sm" variant="destructive" className="h-7 text-[11px]" onClick={() => onCancelOrder(order.id)}>Cancelar pedido</Button>
-              <Button size="sm" className="h-7 bg-violet-600 text-[11px] font-bold text-white hover:bg-violet-700" onClick={() => onOpenOrder(order.id)}>Ver pedido</Button>
+
+            {(order.address_street || order.address_neighborhood) && <p className="mt-2 line-clamp-2 text-[11px] leading-snug text-muted-foreground">{fullAddress}</p>}
+            <div className="mt-2 flex items-center justify-between rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px]">
+              <span>{order.payment_method ? `Pagamento: ${order.payment_method === "pix" ? "Pix" : order.payment_method === "card" ? "Cartão" : order.payment_method}` : "Pagamento não informado"}</span>
+              <strong>{order.total != null ? `R$ ${Number(order.total).toFixed(2).replace(".", ",")}` : "—"}</strong>
             </div>
+
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              {!["ready_pickup", "out_for_delivery"].includes(order.status) && <Button size="sm" variant="outline" className="h-8 border-emerald-300 text-[11px] font-bold text-emerald-700" onClick={() => onUpdateStatus(order.id, "ready_pickup")}>Pronto</Button>}
+              {order.status === "ready_pickup" && <Button size="sm" variant="outline" className="h-8 border-blue-300 text-[11px] font-bold text-blue-700" onClick={() => onUpdateStatus(order.id, "out_for_delivery")}>Saiu para entrega</Button>}
+              {order.status === "out_for_delivery" && <Button size="sm" variant="outline" className="h-8 border-amber-300 bg-amber-50 text-[11px] font-bold text-amber-800" onClick={() => sendArrival(order)} disabled={sendingArrivalId === order.id}><MessageCircle className="mr-1 size-3.5" /> {sendingArrivalId === order.id ? "Avisando..." : "Avisar que chegou"}</Button>}
+              <Button size="sm" variant="outline" className="h-8 text-[11px] font-bold" onClick={() => onOpenChat(order)}><MessageCircle className="mr-1 size-3.5" /> Chat</Button>
+              <Button size="sm" variant="outline" className="h-8 border-sky-300 text-[11px] font-bold text-sky-700" disabled={!mapUrl} onClick={() => mapUrl && window.open(mapUrl, "_blank", "noopener,noreferrer")}><MapPin className="mr-1 size-3.5" /> Mapa</Button>
+            </div>
+
+            <button type="button" onClick={() => setExpandedId(isExpanded ? null : order.id)} className="mt-2 flex w-full items-center justify-center gap-1 rounded-md py-1 text-[10px] font-bold text-muted-foreground hover:bg-muted/60">
+              {isExpanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />} {isExpanded ? "Ocultar resumo" : "Resumo rápido"}
+            </button>
+            {isExpanded && (
+              <div className="mt-1 rounded-lg border bg-background p-2 text-[11px]">
+                <p className="mb-1 font-bold">Itens</p>
+                {items.length ? items.map((item: any) => <div key={item.id} className="flex justify-between gap-2"><span className="truncate">{item.quantity}x {item.product_name}</span><span className="shrink-0">R$ {(Number(item.quantity) * Number(item.unit_price)).toFixed(2).replace(".", ",")}</span></div>) : <p className="text-muted-foreground">Itens não carregados.</p>}
+                <div className="mt-2 border-t pt-1"><strong>Total: R$ {Number(order.total || 0).toFixed(2).replace(".", ",")}</strong></div>
+              </div>
+            )}
           </div>
         );
       })}
