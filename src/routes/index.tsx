@@ -28,11 +28,12 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { brl, formatPhone, onlyDigits } from "@/lib/formatters";
 import { getEffectivePrice } from "@/lib/promotions";
-import hotboxLogo from "@/assets/hotbox-logo.png.asset.json";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+
+const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
 
 export const Route = createFileRoute("/")({
   component: CustomerHome,
@@ -386,7 +387,7 @@ function CustomerHome() {
             <ArrowLeft className="size-5" />
           </button>
           <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-2xl bg-white/95 p-1.5 shadow-lg backdrop-blur">
-            <img src={hotboxLogo.url} alt="HotBox Delivery" className="size-9 rounded-xl object-cover" />
+            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="size-11 rounded-xl object-contain" />
           </div>
           {p.image_url ? (
             <img src={p.image_url} alt={p.name} className="h-64 w-full object-cover sm:h-80" />
@@ -472,7 +473,7 @@ function CustomerHome() {
           <button onClick={() => setView("list")}>
             <ArrowLeft className="size-5" />
           </button>
-          <img src={hotboxLogo.url} alt="HotBox" className="size-9 rounded-xl object-cover" />
+          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-11 rounded-xl object-contain" />
           <h1 className="font-display text-lg font-black tracking-tight">Sua sacola</h1>
         </header>
 
@@ -612,7 +613,7 @@ function CustomerHome() {
           <button onClick={() => setView("cart")}>
             <ArrowLeft className="size-5" />
           </button>
-          <img src={hotboxLogo.url} alt="HotBox" className="size-9 rounded-xl object-cover" />
+          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-11 rounded-xl object-contain" />
           <h1 className="font-display text-lg font-black tracking-tight">Finalizar compra</h1>
         </header>
 
@@ -791,7 +792,7 @@ function CustomerHome() {
       <div className="sticky top-0 z-50 border-b border-black/5 bg-white/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto max-w-2xl">
           <Link to="/" className="flex items-center gap-2.5">
-            <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-12 w-12 rounded-2xl object-cover shadow-sm ring-1 ring-black/10" />
+            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-14 w-14 rounded-2xl object-contain shadow-sm ring-1 ring-black/10" />
             <div className="leading-tight">
               <p className="font-display text-lg font-black">
                 HOT<span className="text-[#d92d20]">BOX</span>
