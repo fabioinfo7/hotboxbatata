@@ -2,13 +2,18 @@ import { createFileRoute } from "@tanstack/react-router";
 import { sendSatisfactionForOrder } from "@/lib/satisfaction.functions";
 
 // Chamado pelo pg_cron a cada minuto. Envia automaticamente o convite de
-// avaliação para pedidos entregues há pelo menos 10 minutos e ainda sem envio.
+// avaliação quando já se passaram pelo menos 10 minutos desde a entrega.
+//
+// IMPORTANTE: esta consulta prioriza os pedidos entregues mais recentes.
+// A versão anterior ordenava updated_at do mais antigo e limitava em 100;
+// quando existiam mais de 100 pedidos antigos entregues, pedidos novos podiam
+// nunca entrar no lote analisado e a avaliação automática ficava bloqueada.
 export const Route = createFileRoute("/api/public/hooks/satisfaction-auto")({
   server: {
     handlers: {
       POST: async ({ request }) => {
         const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-        const cutoff = Date.now() - 10 * 60 * 1000;
+        const cutoffISO = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
         const { data: cfg } = await supabaseAdmin
           .from("store_config")
@@ -20,24 +25,33 @@ export const Route = createFileRoute("/api/public/hooks/satisfaction-auto")({
         }
         if (!origin) return Response.json({ ok: false, error: "app_public_url não configurada" }, { status: 500 });
 
-        // Busca entregues recentes e filtra em memória para aceitar sistemas antigos
-        // nos quais delivered_at eventualmente ficou nulo.
-        const { data: orders, error } = await supabaseAdmin
+        // Fluxo normal: delivered_at preenchido. Busca os elegíveis MAIS RECENTES,
+        // evitando que histórico antigo ocupe permanentemente o limite.
+        const { data: normalOrders, error: normalError } = await supabaseAdmin
           .from("orders")
           .select("id,delivered_at,updated_at,created_at")
           .eq("status", "delivered")
-          .order("updated_at", { ascending: true })
-          .limit(100);
-        if (error) return Response.json({ ok: false, error: error.message }, { status: 500 });
+          .not("delivered_at", "is", null)
+          .lte("delivered_at", cutoffISO)
+          .order("delivered_at", { ascending: false })
+          .limit(200);
+        if (normalError) return Response.json({ ok: false, error: normalError.message }, { status: 500 });
 
-        const candidateIds = (orders ?? [])
-          .filter((o: any) => {
-            const at = new Date(o.delivered_at || o.updated_at || o.created_at).getTime();
-            return Number.isFinite(at) && at <= cutoff;
-          })
-          .map((o: any) => o.id);
+        // Compatibilidade com pedidos antigos nos quais delivered_at ficou nulo.
+        const { data: legacyOrders, error: legacyError } = await supabaseAdmin
+          .from("orders")
+          .select("id,delivered_at,updated_at,created_at")
+          .eq("status", "delivered")
+          .is("delivered_at", null)
+          .lte("updated_at", cutoffISO)
+          .order("updated_at", { ascending: false })
+          .limit(50);
+        if (legacyError) return Response.json({ ok: false, error: legacyError.message }, { status: 500 });
 
-        if (!candidateIds.length) return Response.json({ ok: true, processed: 0, sent: 0 });
+        const unique = new Map<string, any>();
+        for (const o of [...(normalOrders ?? []), ...(legacyOrders ?? [])]) unique.set(o.id, o);
+        const candidateIds = [...unique.keys()];
+        if (!candidateIds.length) return Response.json({ ok: true, processed: 0, sent: 0, failed: 0 });
 
         const { data: feedbackRows } = await supabaseAdmin
           .from("customer_feedback")
@@ -49,19 +63,21 @@ export const Route = createFileRoute("/api/public/hooks/satisfaction-auto")({
 
         let sent = 0;
         let failed = 0;
+        let skipped = 0;
         for (const orderId of candidateIds) {
-          if (done.has(orderId)) continue;
+          if (done.has(orderId)) { skipped++; continue; }
           try {
             const result = await sendSatisfactionForOrder({ supabaseAdmin, orderId, origin });
             if (result.ok && !result.alreadySent) sent++;
             else if (!result.ok) failed++;
+            else skipped++;
           } catch (err) {
             failed++;
             console.error("[satisfaction-auto] erro", { orderId, err });
           }
         }
 
-        return Response.json({ ok: true, processed: candidateIds.length, sent, failed });
+        return Response.json({ ok: true, processed: candidateIds.length, sent, failed, skipped });
       },
     },
   },
