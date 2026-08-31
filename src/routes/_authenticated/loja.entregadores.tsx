@@ -20,6 +20,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { brl, formatDateTime, formatPhone, VEHICLE_LABEL } from "@/lib/formatters";
+import { brasiliaDateISO, brasiliaDayRange, brasiliaPeriodStartISO } from "@/lib/brasilia-date";
 
 export const Route = createFileRoute("/_authenticated/loja/entregadores")({
   component: DeliverersPage,
@@ -76,14 +77,11 @@ const PERIOD_OPTIONS = [
 ];
 
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  return brasiliaDateISO();
 }
 
 function periodStartISO(days: number) {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - Math.max(0, days - 1));
-  return d.toISOString();
+  return brasiliaPeriodStartISO(days);
 }
 
 function DeliverersPage() {
@@ -214,8 +212,9 @@ function DelivererDetailDialog({
     setLoading(true);
     let sinceISO: string, untilISO: string;
     if (period === "custom") {
-      sinceISO = `${from}T00:00:00`;
-      untilISO = `${to}T23:59:59`;
+      const range = brasiliaDayRange(from, to);
+      sinceISO = range.since;
+      untilISO = range.until;
     } else {
       sinceISO = periodStartISO(Number(period));
       untilISO = new Date().toISOString();
