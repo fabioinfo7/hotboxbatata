@@ -17,6 +17,7 @@ import { MessageCircle, UtensilsCrossed, Globe, History, Eye, Trash2, CheckCircl
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { brasiliaDateDaysAgo, brasiliaDayRange } from "@/lib/brasilia-date";
 
 export const Route = createFileRoute("/_authenticated/loja/pedidos")({
   component: OrdersHistoryPage,
@@ -58,9 +59,7 @@ const PAYMENT_LABEL: Record<string, string> = {
 };
 
 function todayISO(offsetDays = 0) {
-  const d = new Date();
-  d.setDate(d.getDate() - offsetDays);
-  return d.toISOString().slice(0, 10);
+  return brasiliaDateDaysAgo(offsetDays);
 }
 
 const PAGE_SIZE = 20;
@@ -81,14 +80,15 @@ function OrdersHistoryPage() {
 
   async function load(targetPage = page) {
     setLoading(true);
+    const { since, until } = brasiliaDayRange(from, to);
     let q = supabase
       .from("orders")
       .select(
         "id,order_number,external_display_id,customer_name,customer_phone,total,status,payment_method,source,created_at,dizimado,coupon_code,coupon_discount",
         { count: "exact" },
       )
-      .gte("created_at", `${from}T00:00:00`)
-      .lte("created_at", `${to}T23:59:59`)
+      .gte("created_at", since)
+      .lte("created_at", until)
       .order("created_at", { ascending: false })
       .range(targetPage * PAGE_SIZE, targetPage * PAGE_SIZE + PAGE_SIZE - 1);
     if (status !== "all") q = q.eq("status", status as any);
