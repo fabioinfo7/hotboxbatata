@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { brasiliaDateDaysAgo, brasiliaDateISO, brasiliaDayRange, brasiliaMonthStart } from "@/lib/brasilia-date";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -130,10 +131,10 @@ type Expense = {
 };
 
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  return brasiliaDateISO();
 }
 function monthStart() {
-  return new Date().toISOString().slice(0, 7) + "-01";
+  return brasiliaMonthStart();
 }
 function monthEnd() {
   const d = new Date();
@@ -168,6 +169,7 @@ export default function FinanceiroPage() {
 
   async function load() {
     setLoading(true);
+    const { since, until } = brasiliaDayRange(from, to);
     const [{ data: exp }, { data: ord }, { data: prods }, { data: recv }, { data: feeCfg }] = await Promise.all([
       supabase
         .from("expenses" as any)
@@ -177,15 +179,15 @@ export default function FinanceiroPage() {
         .from("orders")
         .select("id, total, subtotal, delivery_fee, status, created_at, delivered_at, payment_method, payment_status, payment_confirmed_at, payment_timing, source, coupon_code, coupon_discount, deliverer_id")
         .eq("status", "delivered")
-        .gte("delivered_at", `${from}T00:00:00`)
-        .lte("delivered_at", `${to}T23:59:59.999`),
+        .gte("delivered_at", since)
+        .lte("delivered_at", until),
       supabase.from("products").select("id, name, category, cost_price"),
       supabase
         .from("receivables" as any)
         .select("id, amount, paid_at, customer_name, description")
         .eq("status", "paid")
-        .gte("paid_at", `${from}T00:00:00`)
-        .lte("paid_at", `${to}T23:59:59`) as any,
+        .gte("paid_at", since)
+        .lte("paid_at", until) as any,
       supabase
         .from("store_config")
         .select("fee_pct_whatsapp, fee_pct_site, fee_pct_ifood, fee_pct_99food")
@@ -563,9 +565,9 @@ export default function FinanceiroPage() {
         <div className="ml-auto flex flex-wrap gap-2">
           {[
             { label: "Hoje", f: todayISO(), t: todayISO() },
-            { label: "7 dias", f: new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10), t: todayISO() },
-            { label: "15 dias", f: new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10), t: todayISO() },
-            { label: "30 dias", f: new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10), t: todayISO() },
+            { label: "7 dias", f: brasiliaDateDaysAgo(6), t: todayISO() },
+            { label: "15 dias", f: brasiliaDateDaysAgo(14), t: todayISO() },
+            { label: "30 dias", f: brasiliaDateDaysAgo(29), t: todayISO() },
             { label: "Este mês", f: monthStart(), t: todayISO() },
           ].map((p) => (
             <Button
