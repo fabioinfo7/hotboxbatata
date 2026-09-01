@@ -63,6 +63,7 @@ type Order = {
   customer_cancel_reason: string | null;
   payment_status: string;
   payment_timing: string | null;
+  payment_confirmed_by: string | null;
   delivery_mode: string;
   external_display_id: string | null;
   order_timing: string | null;
@@ -415,7 +416,12 @@ function OrdersDashboard() {
                     <td className="max-w-[260px] p-2 text-xs">
                       {o.address_street ? `${o.address_street}, ${o.address_number}` : "—"}
                     </td>
-                    <td className="p-2 text-xs uppercase">{o.payment_method}</td>
+                    <td className="p-2 text-xs uppercase">
+                      <div>{o.payment_method}</div>
+                      {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "stripe" && (
+                        <div className="mt-1 text-[10px] font-extrabold text-emerald-700">PAGAMENTO CONFIRMADO VIA STRIPE</div>
+                      )}
+                    </td>
                     <td className="p-2 text-right font-bold text-primary">{brl(o.total)}</td>
                     <td className="flex items-center gap-1 p-2">
                       <Link to="/loja/pedido/$id" params={{ id: o.id }} search={{}}>
@@ -569,6 +575,11 @@ function OrdersDashboard() {
                         {o.payment_method === "pix" ? "Pix" : o.payment_method === "cash" ? "Dinheiro" : "Cartão"}
                       </span>
                     </div>
+                    {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "stripe" && (
+                      <div className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] font-extrabold text-emerald-700">
+                        <CheckCircle2 className="size-3.5" /> PAGAMENTO CONFIRMADO VIA STRIPE
+                      </div>
+                    )}
 
                     {o.deliverer_name && (
                       <div className="flex items-center gap-1.5 rounded-lg bg-accent/15 px-2.5 py-1.5 text-[11px]">
