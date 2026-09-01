@@ -14,7 +14,7 @@ export const Route = createFileRoute("/pedido/$id")({
 
 type Order = {
   id: string; order_number: number | null; external_id: string | null; external_display_id: string | null; source: string | null; status: string; customer_name: string;
-  total: number; payment_method: string; payment_status: string; pix_code: string | null;
+  total: number; payment_method: string; payment_status: string; pix_code: string | null; payment_confirmed_by: string | null;
   created_at: string; deliverer_name: string | null; coupon_code: string | null; coupon_discount: number | null;
 };
 
@@ -26,7 +26,7 @@ function OrderStatusPage() {
 
   useEffect(() => {
     const load = async () => {
-      const { data } = await supabase.from("orders").select("id,order_number,external_id,external_display_id,source,status,customer_name,total,payment_method,payment_status,pix_code,created_at,deliverer_name,coupon_code,coupon_discount").eq("id", id).maybeSingle();
+      const { data } = await supabase.from("orders").select("id,order_number,external_id,external_display_id,source,status,customer_name,total,payment_method,payment_status,pix_code,payment_confirmed_by,created_at,deliverer_name,coupon_code,coupon_discount").eq("id", id).maybeSingle();
       setOrder(data as Order);
       const { data: its } = await supabase.from("order_items").select("*").eq("order_id", id);
       setItems(its ?? []);
@@ -114,6 +114,11 @@ function OrderStatusPage() {
             <span>Total</span><span>{brl(order.total)}</span>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">Pagamento: {order.payment_method === "pix" ? "Pix" : order.payment_method === "cash" ? "Dinheiro antecipado" : "Cartão via Stripe"}</p>
+          {order.payment_status === "paid" && order.payment_confirmed_by === "stripe" && (
+            <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700">
+              <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA STRIPE
+            </div>
+          )}
         </Card>
 
         {order.payment_method === "pix" && order.payment_status !== "paid" && order.pix_code && (
