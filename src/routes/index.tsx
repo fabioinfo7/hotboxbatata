@@ -1,6 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import QRCode from "qrcode";
 import { toast } from "sonner";
 import {
   ShoppingCart,
@@ -13,7 +12,6 @@ import {
   ShieldCheck,
   Star,
   ChevronRight,
-  Copy,
   Flame,
   ClipboardList,
   Search,
@@ -63,7 +61,7 @@ type Product = {
 type CartItem = { product: Product; qty: number; notes: string };
 type View = "list" | "detail" | "cart" | "checkout";
 type ActiveFilter = "ativos" | "inativos" | "todos";
-type CheckoutPayment = "card_delivery" | "pix_delivery" | "pix_now" | "card_online";
+type CheckoutPayment = "stripe_card" | "stripe_pix";
 type AreaStatus = "idle" | "checking" | "supported" | "unsupported" | "error";
 
 const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
@@ -90,17 +88,15 @@ function CustomerHome() {
   const [deliveryFee, setDeliveryFee] = useState(0);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [placing, setPlacing] = useState(false);
-  const [pixKey, setPixKey] = useState("");
-  const [pixCopiaCola, setPixCopiaCola] = useState("");
   const [bannerUrl, setBannerUrl] = useState<string | null>(null);
   const [bannerTagline, setBannerTagline] = useState(
     "Batatas recheadas, hambúrgueres artesanais e porções irresistíveis. Direto do forno pra sua casa.",
   );
   const [deliveryTime, setDeliveryTime] = useState<number | null>(null);
   const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [stripePixEnabled, setStripePixEnabled] = useState(false);
   const [pixEnabled, setPixEnabled] = useState(true);
   const [cardEnabled, setCardEnabled] = useState(true);
-  const [pixQrUrl, setPixQrUrl] = useState("");
   const [digitalMenuEnabled, setDigitalMenuEnabled] = useState(true);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [areaStatus, setAreaStatus] = useState<AreaStatus>("idle");
@@ -135,7 +131,7 @@ function CustomerHome() {
     neighborhood: "",
     city: "",
     cep: "",
-    payment: "card_delivery" as CheckoutPayment,
+    payment: "stripe_card" as CheckoutPayment,
   });
 
   useEffect(() => {
@@ -150,18 +146,17 @@ function CustomerHome() {
     supabase
       .from("store_config_public")
       .select(
-        "store_name,default_delivery_fee,pix_key,pix_copia_cola,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
+        "store_name,default_delivery_fee,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,stripe_pix_enabled,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
       )
       .maybeSingle()
       .then(({ data }) => {
         if (data) {
           setStoreName(data.store_name ?? "HotBox Delivery");
           setDeliveryFee(Number(data.default_delivery_fee ?? 0));
-          setPixKey(data.pix_key ?? "");
-          setPixCopiaCola(data.pix_copia_cola ?? "");
           setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
           setBannerUrl(data.banner_image_url ?? null);
           setStripeEnabled((data as any).stripe_enabled === true);
+          setStripePixEnabled((data as any).stripe_pix_enabled === true);
           setDigitalMenuEnabled((data as any).digital_menu_enabled !== false);
           setPixEnabled((data as any).digital_menu_pix_enabled !== false);
           setCardEnabled((data as any).digital_menu_card_enabled !== false);
@@ -173,30 +168,13 @@ function CustomerHome() {
 
   useEffect(() => {
     const available = [
-      cardEnabled ? "card_delivery" : null,
-      pixEnabled ? "pix_delivery" : null,
-      pixEnabled && (pixCopiaCola || pixKey) ? "pix_now" : null,
-      cardEnabled && stripeEnabled ? "card_online" : null,
+      cardEnabled && stripeEnabled ? "stripe_card" : null,
+      pixEnabled && stripeEnabled && stripePixEnabled ? "stripe_pix" : null,
     ].filter(Boolean) as CheckoutPayment[];
     if (!available.includes(form.payment) && available[0]) {
       setForm((current) => ({ ...current, payment: available[0] }));
     }
-  }, [pixEnabled, cardEnabled, stripeEnabled, pixCopiaCola, pixKey]);
-
-  useEffect(() => {
-    const code = pixCopiaCola || pixKey;
-    if (!code) { setPixQrUrl(""); return; }
-    QRCode.toDataURL(code, { width: 280, margin: 1, errorCorrectionLevel: "M" })
-      .then(setPixQrUrl)
-      .catch(() => setPixQrUrl(""));
-  }, [pixCopiaCola, pixKey]);
-
-  async function copyPixCode() {
-    const code = pixCopiaCola || pixKey;
-    if (!code) return;
-    await navigator.clipboard.writeText(code);
-    toast.success("Código Pix copiado");
-  }
+  }, [pixEnabled, cardEnabled, stripeEnabled, stripePixEnabled]);
 
 
   async function checkDeliveryArea(neighborhood: string, street?: string) {
@@ -441,32 +419,14 @@ function CustomerHome() {
     if (!form.name || !form.phone) return toast.error("Preencha nome e telefone");
     if (isDelivery && (!form.street || !form.number || !form.neighborhood)) return toast.error("Preencha rua, número e bairro");
     if (isDelivery && areaStatus !== "supported") return toast.error("Valide sua área de entrega antes de finalizar");
-    if (form.payment === "pix_now" && !(pixCopiaCola || pixKey)) return toast.error("Pix ainda não foi configurado pela loja");
-    if (form.payment === "card_online" && !stripeEnabled) return toast.error("Pagamento online com cartão indisponível no momento");
+    if (!stripeEnabled) return toast.error("Pagamento online indisponível no momento");
+    if (form.payment === "stripe_pix" && !stripePixEnabled) return toast.error("Pix via Stripe indisponível no momento");
 
     setPlacing(true);
     try {
-      let confirmedFee = deliveryFee;
-      if (isDelivery) {
-        const quote = await checkDeliveryArea(form.neighborhood, form.street);
-        if (!quote?.supported) {
-          setAreaStatus("unsupported");
-          setAreaMessage("Esse endereço ficou fora da área de entrega própria. Escolha uma plataforma para continuar.");
-          setView("list");
-          return;
-        }
-        const nextFee = Number(quote.fee ?? deliveryFee ?? 0);
-        if (Number.isFinite(nextFee)) {
-          confirmedFee = nextFee;
-          setDeliveryFee(nextFee);
-        }
-      }
-
-      const paymentMethod = form.payment.startsWith("pix") ? "pix" : "card";
-      const paymentTiming = form.payment === "pix_now" || form.payment === "card_online" ? "now" : "delivery";
-      const items = couponCartPayload();
-      const { data: created, error } = await (supabase as any).rpc("create_site_order_secure", {
-        p_order: {
+      const { createSiteCheckout } = await import("@/lib/site-checkout.functions");
+      const created = await createSiteCheckout({
+        data: {
           customer_name: form.name,
           customer_phone: onlyDigits(form.phone),
           delivery_mode: form.deliveryMode,
@@ -476,61 +436,35 @@ function CustomerHome() {
           address_neighborhood: isDelivery ? form.neighborhood || null : null,
           address_city: isDelivery ? form.city || null : null,
           address_cep: isDelivery ? form.cep || null : null,
-          payment_method: paymentMethod,
-          payment_timing: paymentTiming,
-          change_for: null,
-          pix_code: form.payment === "pix_now" ? pixCopiaCola || pixKey || null : null,
-          delivery_fee: isDelivery ? confirmedFee : 0,
+          payment_kind: form.payment,
+          coupon_code: appliedCoupon?.code || null,
+          items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty, notes: i.notes || null })),
         },
-        p_items: items,
-        p_coupon_code: appliedCoupon?.code || null,
       });
-      if (error) throw error;
-      if (!created?.id) throw new Error("Pedido não retornado pelo servidor");
-      const order = { id: created.id, order_number: created.order_number };
+      if ("error" in created && created.error) throw new Error(created.error);
+      if (!("checkout" in created) || !created.checkout?.id) throw new Error("Checkout não criado");
 
-      pushMyOrder(order.id);
-
-      if (form.payment === "card_online") {
-        const { createStripeCheckout } = await import("@/lib/stripe.functions");
-        const res = await createStripeCheckout({ data: { orderId: order.id, origin: window.location.origin } });
-        if ("url" in res && res.url) {
-          setCart([]);
-          window.location.href = res.url;
-          return;
-        }
-        toast.error(("error" in res && res.error) || "Falha ao iniciar pagamento");
-        return;
-      }
-
-      if (form.payment === "pix_now") {
-        toast.success(`Pedido #${order.order_number} criado. Aguardando confirmação do Pix.`);
-      } else {
-        toast.success(`Pedido #${order.order_number} recebido! O pagamento será feito na entrega.`);
-      }
+      const { createStripeSiteCheckout } = await import("@/lib/stripe.functions");
+      const stripe = await createStripeSiteCheckout({
+        data: { checkoutId: created.checkout.id, origin: window.location.origin },
+      });
+      if (!("url" in stripe) || !stripe.url) throw new Error(("error" in stripe && stripe.error) || "Falha ao abrir o Stripe");
 
       setCart([]);
       removeCoupon();
-      nav({ to: "/pedido/$id", params: { id: order.id } });
+      window.location.href = stripe.url;
     } catch (err: any) {
       console.error(err);
-      const message = String(err?.message || "");
+      const message = String(err?.message || "Não foi possível iniciar o pagamento.");
       if (/fora da área|fora da area|bairro|entrega/i.test(message)) {
         setAreaStatus("unsupported");
         setAreaMessage("Esse endereço não está disponível para entrega própria no momento.");
-        toast.error("Endereço fora da área de entrega própria");
-      } else if (/cupom|primeira compra|limite|promoção|promocao/i.test(message)) {
-        setAppliedCoupon(null);
-        setCouponError(message.replace(/^.*?:\s*/, ""));
-        toast.error(message.replace(/^.*?:\s*/, ""));
-      } else {
-        toast.error("Não foi possível enviar o pedido. Tente novamente.");
       }
+      toast.error(message);
     } finally {
       setPlacing(false);
     }
   }
-
 
   if (!configLoaded) {
     return (
@@ -1030,18 +964,16 @@ function CustomerHome() {
 
           <div>
             <div className="mb-3">
-              <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Forma de pagamento</h3>
+              <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Pagamento seguro</h3>
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                Você escolhe como prefere pagar. Não é obrigatório pagar antecipado para fazer o pedido.
+                O pedido só entra na Hotbox depois que a Stripe confirmar o pagamento pelo webhook. Seus dados bancários não passam pelo nosso sistema.
               </p>
             </div>
 
             <div className="grid gap-2 sm:grid-cols-2">
               {[
-                ...(cardEnabled ? [{ v: "card_delivery" as CheckoutPayment, label: "Cartão na entrega", helper: "Pague ao receber", icon: CreditCard }] : []),
-                ...(pixEnabled ? [{ v: "pix_delivery" as CheckoutPayment, label: "Pix na entrega", helper: "Pague ao receber via QR Code", icon: QrCode }] : []),
-                ...(pixEnabled && (pixCopiaCola || pixKey) ? [{ v: "pix_now" as CheckoutPayment, label: "Pix agora", helper: "Pagamento antecipado", icon: QrCode }] : []),
-                ...(cardEnabled && stripeEnabled ? [{ v: "card_online" as CheckoutPayment, label: "Cartão online", helper: "Checkout seguro", icon: CreditCard }] : []),
+                ...(cardEnabled && stripeEnabled ? [{ v: "stripe_card" as CheckoutPayment, label: "Cartão de crédito ou débito", helper: "Pagamento seguro pela Stripe", icon: CreditCard }] : []),
+                ...(pixEnabled && stripeEnabled && stripePixEnabled ? [{ v: "stripe_pix" as CheckoutPayment, label: "Pix via Stripe", helper: "QR Code dinâmico + confirmação automática", icon: QrCode }] : []),
               ].map((opt) => (
                 <button
                   type="button"
@@ -1060,34 +992,23 @@ function CustomerHome() {
               ))}
             </div>
 
-            {form.payment === "pix_now" && (
-              <div className="mt-4 rounded-3xl border border-amber-200 bg-amber-50/70 p-4">
-                <div className="flex items-start gap-4">
-                  {pixQrUrl && <img src={pixQrUrl} alt="QR Code Pix" className="size-28 rounded-2xl border bg-white p-2 sm:size-32" />}
-                  <div className="min-w-0 flex-1">
-                    <p className="font-bold text-amber-950">Pix antecipado</p>
-                    <p className="mt-1 text-xs leading-relaxed text-amber-900/70">
-                      Use apenas se preferir pagar agora. Seu pedido ficará aguardando a confirmação do Pix antes do preparo.
-                    </p>
-                    <button type="button" onClick={copyPixCode} className="mt-3 inline-flex items-center gap-2 rounded-full bg-black px-4 py-2 text-xs font-bold text-white">
-                      <Copy className="size-3.5" /> Copiar código Pix
-                    </button>
-                  </div>
-                </div>
+            {form.payment === "stripe_pix" && (
+              <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
+                <QrCode className="mt-0.5 size-4 shrink-0" />
+                A Stripe exibirá um QR Code Pix dinâmico com o valor exato. Após o pagamento, o webhook confirma automaticamente e só então o pedido é criado no sistema.
               </div>
             )}
 
-            {form.payment === "card_online" && (
+            {form.payment === "stripe_card" && (
               <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
                 <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-                Você será direcionado ao checkout seguro do Stripe. A Hotbox não recebe os dados do seu cartão.
+                Você será direcionado ao checkout seguro da Stripe para crédito ou débito. O pedido só será criado após a confirmação do pagamento.
               </div>
             )}
 
-            {(form.payment === "card_delivery" || form.payment === "pix_delivery") && (
-              <div className="mt-4 flex items-start gap-2 rounded-2xl border border-sky-200 bg-sky-50 p-3 text-xs leading-relaxed text-sky-900">
-                <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
-                Seu pedido entra normalmente no sistema e você paga somente no momento da entrega.
+            {!stripeEnabled && (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-900">
+                Pagamento online temporariamente indisponível. Fale conosco pelo WhatsApp para fazer seu pedido.
               </div>
             )}
           </div>
@@ -1100,7 +1021,7 @@ function CustomerHome() {
               disabled={placing}
               className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
             >
-              <span>{placing ? "Processando..." : form.payment === "card_online" ? "Ir para pagamento seguro" : "Confirmar pedido"}</span>
+              <span>{placing ? "Abrindo pagamento..." : "Ir para pagamento seguro"}</span>
               <span>{brl(total)}</span>
             </Button>
           </div>
