@@ -752,7 +752,8 @@ function ConfigPage() {
       </Card>
 
       <Card className="space-y-3 p-5" style={tabStyle("pagamentos")}>
-        <h2 className="font-semibold">Pix</h2>
+        <h2 className="font-semibold">Pix da loja</h2>
+        <p className="text-xs text-muted-foreground">Esta chave continua disponível para os fluxos atuais do WhatsApp/manual. O Pix automático do cardápio digital usa o QR Code gerado pela Stripe, porque somente assim a Stripe consegue confirmar o pagamento por webhook.</p>
         <div>
           <Label>Modo</Label>
           <Select value={c.pix_mode || "static"} onValueChange={(v) => setC({ ...c, pix_mode: v })}>
@@ -782,8 +783,8 @@ function ConfigPage() {
       <Card className="space-y-4 p-5" style={tabStyle("pagamentos")}>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold">Stripe — cartão no cardápio digital</h2>
-            <p className="mt-1 text-xs text-muted-foreground">O cliente paga antes do pedido entrar no fluxo operacional. A confirmação do Stripe marca o pedido como pago automaticamente.</p>
+            <h2 className="font-semibold">Stripe — cartão e Pix no cardápio digital</h2>
+            <p className="mt-1 text-xs text-muted-foreground">No cardápio digital, o pedido só é criado após o webhook da Stripe confirmar o pagamento. O fluxo do WhatsApp e dos pedidos manuais não é alterado.</p>
           </div>
           <Switch checked={c.stripe_enabled === true} onCheckedChange={(v) => setC({ ...c, stripe_enabled: v })} />
         </div>
@@ -800,6 +801,13 @@ function ConfigPage() {
             <Label>Webhook signing secret</Label>
             <Input type="password" value={c.stripe_webhook_secret || ""} onChange={(e) => setC({ ...c, stripe_webhook_secret: e.target.value })} placeholder="whsec_..." />
             <p className="mt-1 text-[11px] text-muted-foreground">No Stripe, cadastre o endpoint: <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/stripe` : "/api/public/webhooks/stripe"}</code></p>
+          </div>
+          <div className="sm:col-span-2 flex items-center justify-between gap-4 rounded-xl border p-3">
+            <div>
+              <Label>Pix via Stripe</Label>
+              <p className="mt-1 text-[11px] text-muted-foreground">Ative somente depois de habilitar Pix também no Dashboard da Stripe. A Stripe gera o QR Code e confirma o pagamento pelo webhook.</p>
+            </div>
+            <Switch checked={c.stripe_pix_enabled === true} onCheckedChange={(v) => setC({ ...c, stripe_pix_enabled: v })} />
           </div>
         </div>
       </Card>
@@ -825,9 +833,8 @@ function ConfigPage() {
           <Label>Formas aceitas no cardápio digital</Label>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             {[
-              ["digital_menu_pix_enabled", "Pix antecipado"],
-              ["digital_menu_card_enabled", "Cartão via Stripe"],
-              ["digital_menu_cash_enabled", "Dinheiro antecipado"],
+              ["digital_menu_pix_enabled", "Pix via Stripe"],
+              ["digital_menu_card_enabled", "Cartão crédito/débito via Stripe"],
             ].map(([field, label]) => (
               <label key={field} className="flex items-center justify-between gap-3 rounded-xl border p-3 text-sm font-medium">
                 {label}
@@ -835,7 +842,7 @@ function ConfigPage() {
               </label>
             ))}
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">Nenhuma dessas opções é pagamento na entrega. Pix e dinheiro ficam aguardando confirmação; cartão é confirmado automaticamente pelo Stripe.</p>
+          <p className="mt-2 text-xs text-muted-foreground">No cardápio digital, cartão e Pix são confirmados automaticamente pela Stripe. O pedido não aparece na operação antes dessa confirmação.</p>
         </div>
       </Card>
 
