@@ -808,9 +808,12 @@ function CustomerHome() {
                   <span>-{brl(couponDiscount)}</span>
                 </div>
               )}
-              <div className="flex justify-between text-sm text-foreground/70">
-                <span>Taxa de entrega</span>
-                <span>{isDelivery ? brl(deliveryFee) : "Retirada"}</span>
+              <div className="mt-4 flex items-center justify-between rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3">
+                <div>
+                  <span className="block text-xs font-black uppercase tracking-wide text-amber-900">Taxa de entrega</span>
+                  <span className="text-[11px] text-amber-800/80">Já incluída no total abaixo</span>
+                </div>
+                <span className="text-xl font-black text-amber-950">{isDelivery ? brl(deliveryFee) : "Retirada"}</span>
               </div>
               <div className="mt-2 flex justify-between border-t pt-2 text-lg font-extrabold">
                 <span>Total</span>
@@ -954,8 +957,14 @@ function CustomerHome() {
                     readOnly={!!form.cep && areaStatus === "supported"}
                     onChange={(e) => setForm({ ...form, cep: e.target.value })}
                   />
-                  <div className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
-                    <CheckCircle2 className="size-4" /> Área de entrega validada · taxa {brl(deliveryFee)}
+                  <div className="mt-3 rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-4">
+                    <div className="flex items-center gap-2 text-sm font-black text-emerald-900">
+                      <CheckCircle2 className="size-5" /> Entregamos no seu endereço
+                    </div>
+                    <div className="mt-2 flex items-end justify-between gap-3">
+                      <span className="text-xs font-bold uppercase tracking-wide text-emerald-800">Taxa de entrega</span>
+                      <span className="text-2xl font-black text-emerald-950">{brl(deliveryFee)}</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -966,14 +975,14 @@ function CustomerHome() {
             <div className="mb-3">
               <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Pagamento seguro</h3>
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                O pedido só entra na Hotbox depois que a Stripe confirmar o pagamento pelo webhook. Seus dados bancários não passam pelo nosso sistema.
+                Escolha como prefere pagar. Assim que o pagamento for aprovado, seu pedido é confirmado automaticamente e enviado para preparo.
               </p>
             </div>
 
             <div className="grid gap-2 sm:grid-cols-2">
               {[
-                ...(cardEnabled && stripeEnabled ? [{ v: "stripe_card" as CheckoutPayment, label: "Cartão de crédito ou débito", helper: "Pagamento seguro pela Stripe", icon: CreditCard }] : []),
-                ...(pixEnabled && stripeEnabled && stripePixEnabled ? [{ v: "stripe_pix" as CheckoutPayment, label: "Pix via Stripe", helper: "QR Code dinâmico + confirmação automática", icon: QrCode }] : []),
+                ...(cardEnabled && stripeEnabled ? [{ v: "stripe_card" as CheckoutPayment, label: "Cartão de crédito ou débito", helper: "Pagamento online seguro", icon: CreditCard }] : []),
+                ...(pixEnabled && stripeEnabled && stripePixEnabled ? [{ v: "stripe_pix" as CheckoutPayment, label: "Pix", helper: "QR Code com confirmação automática", icon: QrCode }] : []),
               ].map((opt) => (
                 <button
                   type="button"
@@ -995,14 +1004,14 @@ function CustomerHome() {
             {form.payment === "stripe_pix" && (
               <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
                 <QrCode className="mt-0.5 size-4 shrink-0" />
-                A Stripe exibirá um QR Code Pix dinâmico com o valor exato. Após o pagamento, o webhook confirma automaticamente e só então o pedido é criado no sistema.
+                Na próxima tela você verá o QR Code Pix com o valor exato do seu pedido. Assim que o pagamento for identificado, confirmaremos seu pedido automaticamente.
               </div>
             )}
 
             {form.payment === "stripe_card" && (
               <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
                 <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-                Você será direcionado ao checkout seguro da Stripe para crédito ou débito. O pedido só será criado após a confirmação do pagamento.
+                Você será direcionado para uma página segura de pagamento. Assim que o cartão for aprovado, seu pedido será confirmado automaticamente.
               </div>
             )}
 
@@ -1021,7 +1030,7 @@ function CustomerHome() {
               disabled={placing}
               className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
             >
-              <span>{placing ? "Abrindo pagamento..." : "Ir para pagamento seguro"}</span>
+              <span>{placing ? "Preparando pagamento..." : "Continuar para pagamento"}</span>
               <span>{brl(total)}</span>
             </Button>
           </div>
@@ -1081,8 +1090,11 @@ function CustomerHome() {
                 <Clock className="size-4" /> {deliveryTime}-{deliveryTime + 15} min
               </span>
             )}
-            <span className="flex items-center gap-1.5">
-              <MapPin className="size-4" /> {validatedNeighborhood || "Entrega"} · {deliveryFee > 0 ? brl(deliveryFee) : "grátis"}
+            <span className="flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1.5 backdrop-blur">
+              <MapPin className="size-4" /> {validatedNeighborhood || "Entrega"}
+            </span>
+            <span className="flex items-center gap-1.5 rounded-full bg-[#ffd400] px-3 py-1.5 font-black text-black shadow-sm">
+              <Bike className="size-4" /> Taxa de entrega: {deliveryFee > 0 ? brl(deliveryFee) : "grátis"}
             </span>
           </div>
         </div>
