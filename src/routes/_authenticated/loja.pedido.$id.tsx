@@ -924,8 +924,13 @@ function OrderDetail() {
             </p>
             {order.payment_confirmed_by && (
               <p className="mt-1 text-xs text-muted-foreground">
-                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : "Admin"}
+                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : order.payment_confirmed_by === "stripe" ? "Stripe — pagamento confirmado por webhook" : "Admin"}
               </p>
+            )}
+            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "stripe" && (
+              <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700">
+                <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA STRIPE
+              </div>
             )}
             {order.payment_receipt_url && (
               <a href={order.payment_receipt_url} target="_blank" rel="noopener noreferrer" className="mt-3 block">
