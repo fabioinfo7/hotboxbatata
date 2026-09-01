@@ -10,7 +10,6 @@ import {
   MapPin,
   CreditCard,
   QrCode,
-  Banknote,
   ShieldCheck,
   Star,
   ChevronRight,
@@ -24,6 +23,10 @@ import {
   Clock,
   Ticket,
   X,
+  CheckCircle2,
+  AlertTriangle,
+  Loader2,
+  MessageCircle,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { brl, formatPhone, onlyDigits } from "@/lib/formatters";
@@ -32,8 +35,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-
-const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
 
 export const Route = createFileRoute("/")({
   component: CustomerHome,
@@ -62,6 +63,13 @@ type Product = {
 type CartItem = { product: Product; qty: number; notes: string };
 type View = "list" | "detail" | "cart" | "checkout";
 type ActiveFilter = "ativos" | "inativos" | "todos";
+type CheckoutPayment = "card_delivery" | "pix_delivery" | "pix_now" | "card_online";
+type AreaStatus = "idle" | "checking" | "supported" | "unsupported" | "error";
+
+const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
+const WHATSAPP_URL = "https://wa.me/5521984296288?text=" + encodeURIComponent("Olá! Preciso de ajuda com meu pedido no cardápio digital da Hotbox.");
+const IFOOD_URL = "https://www.ifood.com.br/delivery/duque-de-caxias-rj/hotbox-delivery-jardim-gramacho/812f264d-658d-4e54-88d1-ac4f6d040916";
+const NFOOD_URL = "https://oia.99app.com/dlp9/3SsCkm?area=BR";
 
 const MY_ORDERS_KEY = "hb_my_orders";
 function pushMyOrder(id: string) {
@@ -90,10 +98,17 @@ function CustomerHome() {
   );
   const [deliveryTime, setDeliveryTime] = useState<number | null>(null);
   const [stripeEnabled, setStripeEnabled] = useState(false);
-  const [cashEnabled, setCashEnabled] = useState(true);
   const [pixEnabled, setPixEnabled] = useState(true);
   const [cardEnabled, setCardEnabled] = useState(true);
   const [pixQrUrl, setPixQrUrl] = useState("");
+  const [digitalMenuEnabled, setDigitalMenuEnabled] = useState(true);
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const [areaStatus, setAreaStatus] = useState<AreaStatus>("idle");
+  const [accessCep, setAccessCep] = useState("");
+  const [manualNeighborhood, setManualNeighborhood] = useState("");
+  const [manualAreaMode, setManualAreaMode] = useState(false);
+  const [areaMessage, setAreaMessage] = useState("");
+  const [validatedNeighborhood, setValidatedNeighborhood] = useState("");
 
 
   const [couponInput, setCouponInput] = useState("");
@@ -120,8 +135,7 @@ function CustomerHome() {
     neighborhood: "",
     city: "",
     cep: "",
-    payment: "pix" as "pix" | "card" | "cash",
-    changeFor: "",
+    payment: "card_delivery" as CheckoutPayment,
   });
 
   useEffect(() => {
@@ -136,7 +150,7 @@ function CustomerHome() {
     supabase
       .from("store_config_public")
       .select(
-        "store_name,default_delivery_fee,pix_key,pix_copia_cola,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,digital_menu_cash_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
+        "store_name,default_delivery_fee,pix_key,pix_copia_cola,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
       )
       .maybeSingle()
       .then(({ data }) => {
@@ -148,24 +162,26 @@ function CustomerHome() {
           setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
           setBannerUrl(data.banner_image_url ?? null);
           setStripeEnabled((data as any).stripe_enabled === true);
-          setCashEnabled((data as any).digital_menu_cash_enabled !== false);
+          setDigitalMenuEnabled((data as any).digital_menu_enabled !== false);
           setPixEnabled((data as any).digital_menu_pix_enabled !== false);
           setCardEnabled((data as any).digital_menu_card_enabled !== false);
           if (data.banner_tagline) setBannerTagline(data.banner_tagline);
         }
+        setConfigLoaded(true);
       });
   }, []);
 
   useEffect(() => {
     const available = [
-      pixEnabled ? "pix" : null,
-      cardEnabled && stripeEnabled ? "card" : null,
-      cashEnabled ? "cash" : null,
-    ].filter(Boolean) as Array<"pix" | "card" | "cash">;
+      cardEnabled ? "card_delivery" : null,
+      pixEnabled ? "pix_delivery" : null,
+      pixEnabled && (pixCopiaCola || pixKey) ? "pix_now" : null,
+      cardEnabled && stripeEnabled ? "card_online" : null,
+    ].filter(Boolean) as CheckoutPayment[];
     if (!available.includes(form.payment) && available[0]) {
       setForm((current) => ({ ...current, payment: available[0] }));
     }
-  }, [pixEnabled, cardEnabled, stripeEnabled, cashEnabled]);
+  }, [pixEnabled, cardEnabled, stripeEnabled, pixCopiaCola, pixKey]);
 
   useEffect(() => {
     const code = pixCopiaCola || pixKey;
@@ -180,6 +196,123 @@ function CustomerHome() {
     if (!code) return;
     await navigator.clipboard.writeText(code);
     toast.success("Código Pix copiado");
+  }
+
+
+  async function checkDeliveryArea(neighborhood: string, street?: string) {
+    const { data, error } = await (supabase as any).rpc("check_delivery_area_public", {
+      p_neighborhood: neighborhood,
+      p_street: street || null,
+    });
+    if (error) throw error;
+    return data as {
+      supported: boolean;
+      neighborhood?: string | null;
+      fee?: number | string | null;
+      reason?: string | null;
+      matched_zone?: boolean;
+    };
+  }
+
+  async function validateCepAccess() {
+    const cep = onlyDigits(accessCep);
+    if (cep.length !== 8) {
+      setAreaStatus("error");
+      setAreaMessage("Digite um CEP válido com 8 números.");
+      return;
+    }
+    setAreaStatus("checking");
+    setAreaMessage("");
+    try {
+      const response = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      if (!response.ok) throw new Error("Falha ao consultar CEP");
+      const address = await response.json();
+      if (address?.erro) throw new Error("CEP não encontrado");
+      if (!address?.bairro) {
+        setManualAreaMode(true);
+        setAreaStatus("error");
+        setAreaMessage("Encontramos o CEP, mas ele não informou o bairro. Digite seu bairro abaixo para continuar.");
+        setForm((current) => ({
+          ...current,
+          cep,
+          street: address?.logradouro || current.street,
+          city: address?.localidade || current.city,
+        }));
+        return;
+      }
+      const quote = await checkDeliveryArea(address.bairro, address.logradouro || undefined);
+      if (!quote?.supported) {
+        setValidatedNeighborhood(address.bairro);
+        setAreaStatus("unsupported");
+        setAreaMessage(`No momento a entrega própria não atende ${address.bairro}.`);
+        return;
+      }
+      const fee = Number(quote.fee ?? deliveryFee ?? 0);
+      setDeliveryFee(Number.isFinite(fee) ? fee : 0);
+      setValidatedNeighborhood(String(quote.neighborhood || address.bairro));
+      setForm((current) => ({
+        ...current,
+        deliveryMode: "delivery",
+        cep,
+        street: address.logradouro || current.street,
+        neighborhood: String(quote.neighborhood || address.bairro),
+        city: address.localidade || current.city,
+      }));
+      setAreaStatus("supported");
+      setAreaMessage("");
+      toast.success("Entrega disponível para o seu endereço!");
+    } catch (error) {
+      console.error(error);
+      setAreaStatus("error");
+      setManualAreaMode(true);
+      setAreaMessage("Não conseguimos consultar esse CEP agora. Você pode informar seu bairro manualmente.");
+    }
+  }
+
+  async function validateManualNeighborhood() {
+    const neighborhood = manualNeighborhood.trim();
+    if (neighborhood.length < 3) {
+      setAreaStatus("error");
+      setAreaMessage("Informe o nome do bairro para continuar.");
+      return;
+    }
+    setAreaStatus("checking");
+    try {
+      const quote = await checkDeliveryArea(neighborhood);
+      if (!quote?.supported) {
+        setValidatedNeighborhood(neighborhood);
+        setAreaStatus("unsupported");
+        setAreaMessage(`No momento a entrega própria não atende ${neighborhood}.`);
+        return;
+      }
+      const fee = Number(quote.fee ?? deliveryFee ?? 0);
+      setDeliveryFee(Number.isFinite(fee) ? fee : 0);
+      setValidatedNeighborhood(String(quote.neighborhood || neighborhood));
+      setForm((current) => ({
+        ...current,
+        deliveryMode: "delivery",
+        neighborhood: String(quote.neighborhood || neighborhood),
+      }));
+      setAreaStatus("supported");
+      setAreaMessage("");
+      toast.success("Seu bairro está na nossa área de entrega!");
+    } catch (error) {
+      console.error(error);
+      setAreaStatus("error");
+      setAreaMessage("Não foi possível validar o bairro agora. Tente novamente.");
+    }
+  }
+
+  function resetAreaAccess() {
+    setAreaStatus("idle");
+    setAreaMessage("");
+    setValidatedNeighborhood("");
+    setAccessCep("");
+    setManualNeighborhood("");
+    setManualAreaMode(false);
+    setCart([]);
+    setView("list");
+    setForm((current) => ({ ...current, street: "", number: "", complement: "", neighborhood: "", city: "", cep: "" }));
   }
 
   const categories = useMemo(
@@ -307,12 +440,30 @@ function CustomerHome() {
     if (!cart.length) return toast.error("Seu carrinho está vazio");
     if (!form.name || !form.phone) return toast.error("Preencha nome e telefone");
     if (isDelivery && (!form.street || !form.number || !form.neighborhood)) return toast.error("Preencha rua, número e bairro");
-    if (form.payment === "pix" && !(pixCopiaCola || pixKey)) return toast.error("Pix ainda não foi configurado pela loja");
-    if (form.payment === "card" && !stripeEnabled) return toast.error("Cartão indisponível no momento");
-    // A confirmação definitiva do cupom acontece no banco junto com a criação do pedido.
-    // Assim limite geral, limite por cliente e primeira compra não sofrem condição de corrida.
+    if (isDelivery && areaStatus !== "supported") return toast.error("Valide sua área de entrega antes de finalizar");
+    if (form.payment === "pix_now" && !(pixCopiaCola || pixKey)) return toast.error("Pix ainda não foi configurado pela loja");
+    if (form.payment === "card_online" && !stripeEnabled) return toast.error("Pagamento online com cartão indisponível no momento");
+
     setPlacing(true);
     try {
+      let confirmedFee = deliveryFee;
+      if (isDelivery) {
+        const quote = await checkDeliveryArea(form.neighborhood, form.street);
+        if (!quote?.supported) {
+          setAreaStatus("unsupported");
+          setAreaMessage("Esse endereço ficou fora da área de entrega própria. Escolha uma plataforma para continuar.");
+          setView("list");
+          return;
+        }
+        const nextFee = Number(quote.fee ?? deliveryFee ?? 0);
+        if (Number.isFinite(nextFee)) {
+          confirmedFee = nextFee;
+          setDeliveryFee(nextFee);
+        }
+      }
+
+      const paymentMethod = form.payment.startsWith("pix") ? "pix" : "card";
+      const paymentTiming = form.payment === "pix_now" || form.payment === "card_online" ? "now" : "delivery";
       const items = couponCartPayload();
       const { data: created, error } = await (supabase as any).rpc("create_site_order_secure", {
         p_order: {
@@ -325,11 +476,11 @@ function CustomerHome() {
           address_neighborhood: isDelivery ? form.neighborhood || null : null,
           address_city: isDelivery ? form.city || null : null,
           address_cep: isDelivery ? form.cep || null : null,
-          payment_method: form.payment,
-          payment_timing: "now",
+          payment_method: paymentMethod,
+          payment_timing: paymentTiming,
           change_for: null,
-          pix_code: form.payment === "pix" ? pixCopiaCola || pixKey || null : null,
-          delivery_fee: isDelivery ? deliveryFee : 0,
+          pix_code: form.payment === "pix_now" ? pixCopiaCola || pixKey || null : null,
+          delivery_fee: isDelivery ? confirmedFee : 0,
         },
         p_items: items,
         p_coupon_code: appliedCoupon?.code || null,
@@ -338,10 +489,9 @@ function CustomerHome() {
       if (!created?.id) throw new Error("Pedido não retornado pelo servidor");
       const order = { id: created.id, order_number: created.order_number };
 
-
       pushMyOrder(order.id);
 
-      if (form.payment === "card") {
+      if (form.payment === "card_online") {
         const { createStripeCheckout } = await import("@/lib/stripe.functions");
         const res = await createStripeCheckout({ data: { orderId: order.id, origin: window.location.origin } });
         if ("url" in res && res.url) {
@@ -350,12 +500,14 @@ function CustomerHome() {
           return;
         }
         toast.error(("error" in res && res.error) || "Falha ao iniciar pagamento");
-      } else {
-        toast.success(form.payment === "pix"
-          ? `Pedido #${order.order_number} criado. Aguardando confirmação do Pix.`
-          : `Pedido #${order.order_number} criado. Aguardando confirmação do pagamento em dinheiro.`);
+        return;
       }
 
+      if (form.payment === "pix_now") {
+        toast.success(`Pedido #${order.order_number} criado. Aguardando confirmação do Pix.`);
+      } else {
+        toast.success(`Pedido #${order.order_number} recebido! O pagamento será feito na entrega.`);
+      }
 
       setCart([]);
       removeCoupon();
@@ -363,7 +515,11 @@ function CustomerHome() {
     } catch (err: any) {
       console.error(err);
       const message = String(err?.message || "");
-      if (/cupom|primeira compra|limite|promoção|promocao/i.test(message)) {
+      if (/fora da área|fora da area|bairro|entrega/i.test(message)) {
+        setAreaStatus("unsupported");
+        setAreaMessage("Esse endereço não está disponível para entrega própria no momento.");
+        toast.error("Endereço fora da área de entrega própria");
+      } else if (/cupom|primeira compra|limite|promoção|promocao/i.test(message)) {
         setAppliedCoupon(null);
         setCouponError(message.replace(/^.*?:\s*/, ""));
         toast.error(message.replace(/^.*?:\s*/, ""));
@@ -373,6 +529,147 @@ function CustomerHome() {
     } finally {
       setPlacing(false);
     }
+  }
+
+
+  if (!configLoaded) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-[#f7f7f7] px-6">
+        <div className="text-center">
+          <Loader2 className="mx-auto size-7 animate-spin text-primary" />
+          <p className="mt-3 text-sm font-semibold text-muted-foreground">Carregando o cardápio...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!digitalMenuEnabled) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-[#f7f7f7] px-5">
+        <div className="w-full max-w-md rounded-[32px] border bg-white p-7 text-center shadow-xl">
+          <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="mx-auto h-24 w-24 rounded-3xl object-contain shadow-sm" />
+          <h1 className="mt-5 font-display text-3xl font-black">Cardápio temporariamente indisponível</h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            Nosso atendimento pelo WhatsApp continua funcionando normalmente. Fale com a Hotbox e fazemos seu pedido por lá.
+          </p>
+          <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-full bg-[#25D366] px-5 py-3.5 text-sm font-black text-white">
+            <MessageCircle className="size-5" /> Pedir pelo WhatsApp
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  if (areaStatus !== "supported") {
+    const outside = areaStatus === "unsupported";
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-[#160805] via-[#4f0f0c] to-[#f7f7f7] px-4 py-8 sm:py-12">
+        <div className="mx-auto max-w-lg">
+          <div className="rounded-[34px] border border-white/10 bg-white p-6 shadow-2xl sm:p-8">
+            <div className="flex items-center gap-3">
+              <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-20 w-20 rounded-3xl object-contain shadow-md" />
+              <div>
+                <p className="font-display text-2xl font-black leading-none">HOT<span className="text-[#d92d20]">BOX</span></p>
+                <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.22em] text-[#d92d20]">Delivery</p>
+              </div>
+            </div>
+
+            {!outside ? (
+              <>
+                <div className="mt-7 rounded-3xl bg-gradient-to-br from-amber-50 to-orange-50 p-5">
+                  <div className="flex items-start gap-3">
+                    <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#ffd400] text-black">
+                      <MapPin className="size-5" />
+                    </div>
+                    <div>
+                      <h1 className="font-display text-2xl font-black leading-tight">Primeiro, vamos confirmar sua entrega</h1>
+                      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                        Informe seu CEP. Em poucos segundos verificamos o bairro, preenchemos parte do endereço e mostramos a taxa antes de você montar o pedido.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <Label>CEP para entrega</Label>
+                  <div className="mt-2 flex gap-2">
+                    <Input
+                      inputMode="numeric"
+                      autoComplete="postal-code"
+                      className="h-12 rounded-2xl text-base"
+                      placeholder="00000-000"
+                      value={accessCep}
+                      onChange={(e) => setAccessCep(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") void validateCepAccess(); }}
+                    />
+                    <Button onClick={validateCepAccess} disabled={areaStatus === "checking"} className="h-12 rounded-2xl px-5 font-black">
+                      {areaStatus === "checking" ? <Loader2 className="size-4 animate-spin" /> : "Verificar"}
+                    </Button>
+                  </div>
+                </div>
+
+                {(manualAreaMode || areaStatus === "error") && (
+                  <div className="mt-4 rounded-2xl border bg-muted/30 p-4">
+                    <Label>Ou informe seu bairro</Label>
+                    <div className="mt-2 flex gap-2">
+                      <Input
+                        className="h-11 rounded-xl"
+                        placeholder="Ex.: Itatiaia"
+                        value={manualNeighborhood}
+                        onChange={(e) => setManualNeighborhood(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") void validateManualNeighborhood(); }}
+                      />
+                      <Button variant="outline" onClick={validateManualNeighborhood} disabled={areaStatus === "checking"} className="h-11 rounded-xl">Validar</Button>
+                    </div>
+                  </div>
+                )}
+
+                {areaMessage && (
+                  <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0" /> {areaMessage}
+                  </div>
+                )}
+
+                {!manualAreaMode && (
+                  <button type="button" onClick={() => setManualAreaMode(true)} className="mt-4 w-full text-center text-xs font-semibold text-muted-foreground underline underline-offset-4">
+                    Não sei meu CEP
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="mt-7 rounded-3xl border border-orange-200 bg-orange-50 p-5">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="mt-0.5 size-6 shrink-0 text-orange-600" />
+                    <div>
+                      <h1 className="font-display text-2xl font-black">Entrega própria indisponível nessa região</h1>
+                      <p className="mt-1 text-sm leading-relaxed text-orange-950/70">{areaMessage}</p>
+                      {validatedNeighborhood && <p className="mt-2 text-sm font-bold text-orange-950">Bairro identificado: {validatedNeighborhood}</p>}
+                    </div>
+                  </div>
+                </div>
+
+                <p className="mt-5 text-sm leading-relaxed text-muted-foreground">
+                  Você não precisa desistir do pedido. Para regiões mais distantes, confira a disponibilidade pelas plataformas parceiras.
+                </p>
+                <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                  <a href={IFOOD_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ea1d2c] px-4 py-3 text-center text-sm font-black text-white">Pedir pelo iFood</a>
+                  <a href={NFOOD_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ff7a00] px-4 py-3 text-center text-sm font-black text-white">Pedir pela 99Food</a>
+                </div>
+                <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" className="mt-2 flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold">
+                  <MessageCircle className="size-4" /> Tirar uma dúvida no WhatsApp
+                </a>
+                <button type="button" onClick={resetAreaAccess} className="mt-4 w-full text-center text-xs font-bold text-muted-foreground underline underline-offset-4">Verificar outro CEP ou bairro</button>
+              </>
+            )}
+
+            <div className="mt-6 flex items-center justify-center gap-2 border-t pt-5 text-xs text-muted-foreground">
+              <ShieldCheck className="size-4 text-emerald-600" /> Seus dados são usados apenas para atendimento e entrega.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (view === "detail" && selectedProduct) {
@@ -387,7 +684,7 @@ function CustomerHome() {
             <ArrowLeft className="size-5" />
           </button>
           <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-2xl bg-white/95 p-1.5 shadow-lg backdrop-blur">
-            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="size-11 rounded-xl object-contain" />
+            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="size-9 rounded-xl object-contain" />
           </div>
           {p.image_url ? (
             <img src={p.image_url} alt={p.name} className="h-64 w-full object-cover sm:h-80" />
@@ -473,7 +770,7 @@ function CustomerHome() {
           <button onClick={() => setView("list")}>
             <ArrowLeft className="size-5" />
           </button>
-          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-11 rounded-xl object-contain" />
+          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-9 rounded-xl object-contain" />
           <h1 className="font-display text-lg font-black tracking-tight">Sua sacola</h1>
         </header>
 
@@ -488,7 +785,7 @@ function CustomerHome() {
                     <img
                       src={i.product.image_url}
                       alt={i.product.name}
-                      className="size-24 shrink-0 rounded-2xl object-cover"
+                      className="size-24 shrink-0 rounded-2xl object-contain"
                     />
                   ) : (
                     <div className="grid size-16 shrink-0 place-items-center rounded-xl bg-muted text-[9px] text-muted-foreground">
@@ -613,7 +910,7 @@ function CustomerHome() {
           <button onClick={() => setView("cart")}>
             <ArrowLeft className="size-5" />
           </button>
-          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-11 rounded-xl object-contain" />
+          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-9 rounded-xl object-contain" />
           <h1 className="font-display text-lg font-black tracking-tight">Finalizar compra</h1>
         </header>
 
@@ -695,59 +992,83 @@ function CustomerHome() {
                   <div>
                     <Label>Bairro</Label>
                     <Input
-                      className="mt-1 rounded-xl"
+                      className="mt-1 rounded-xl bg-muted/40"
                       value={form.neighborhood}
+                      readOnly={areaStatus === "supported"}
                       onChange={(e) => setForm({ ...form, neighborhood: e.target.value })}
                     />
                   </div>
                   <div>
                     <Label>Cidade</Label>
                     <Input
-                      className="mt-1 rounded-xl"
+                      className="mt-1 rounded-xl bg-muted/40"
                       value={form.city}
+                      readOnly={!!form.city && areaStatus === "supported"}
                       onChange={(e) => setForm({ ...form, city: e.target.value })}
                     />
                   </div>
                 </div>
                 <div>
-                  <Label>CEP</Label>
+                  <div className="flex items-center justify-between">
+                    <Label>CEP</Label>
+                    <button type="button" onClick={resetAreaAccess} className="text-[11px] font-bold text-primary underline underline-offset-2">Trocar CEP/bairro</button>
+                  </div>
                   <Input
-                    className="mt-1 rounded-xl"
+                    className="mt-1 rounded-xl bg-muted/40"
                     placeholder="00000-000"
                     value={form.cep}
+                    readOnly={!!form.cep && areaStatus === "supported"}
                     onChange={(e) => setForm({ ...form, cep: e.target.value })}
                   />
+                  <div className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+                    <CheckCircle2 className="size-4" /> Área de entrega validada · taxa {brl(deliveryFee)}
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
           <div>
-            <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Forma de pagamento</h3>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="mb-3">
+              <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Forma de pagamento</h3>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Você escolhe como prefere pagar. Não é obrigatório pagar antecipado para fazer o pedido.
+              </p>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
               {[
-                ...(pixEnabled ? [{ v: "pix", label: "Pix", icon: QrCode }] : []),
-                ...(cardEnabled && stripeEnabled ? [{ v: "card", label: "Cartão", icon: CreditCard }] : []),
-                ...(cashEnabled ? [{ v: "cash", label: "Dinheiro", icon: Banknote }] : []),
+                ...(cardEnabled ? [{ v: "card_delivery" as CheckoutPayment, label: "Cartão na entrega", helper: "Pague ao receber", icon: CreditCard }] : []),
+                ...(pixEnabled ? [{ v: "pix_delivery" as CheckoutPayment, label: "Pix na entrega", helper: "Pague ao receber via QR Code", icon: QrCode }] : []),
+                ...(pixEnabled && (pixCopiaCola || pixKey) ? [{ v: "pix_now" as CheckoutPayment, label: "Pix agora", helper: "Pagamento antecipado", icon: QrCode }] : []),
+                ...(cardEnabled && stripeEnabled ? [{ v: "card_online" as CheckoutPayment, label: "Cartão online", helper: "Checkout seguro", icon: CreditCard }] : []),
               ].map((opt) => (
                 <button
+                  type="button"
                   key={opt.v}
-                  onClick={() => setForm({ ...form, payment: opt.v as any })}
-                  className={`flex flex-col items-center gap-1 rounded-2xl border-2 py-3 text-xs font-bold transition ${form.payment === opt.v ? "border-primary bg-primary/5 text-primary" : "border-border text-foreground/60"}`}
+                  onClick={() => setForm({ ...form, payment: opt.v })}
+                  className={`flex items-center gap-3 rounded-2xl border-2 p-3 text-left transition ${form.payment === opt.v ? "border-primary bg-primary/5 shadow-sm" : "border-border bg-background"}`}
                 >
-                  <opt.icon className="size-5" /> {opt.label}
+                  <span className={`grid size-10 shrink-0 place-items-center rounded-xl ${form.payment === opt.v ? "bg-primary text-primary-foreground" : "bg-muted text-foreground/60"}`}>
+                    <opt.icon className="size-5" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-black">{opt.label}</span>
+                    <span className="block text-[11px] text-muted-foreground">{opt.helper}</span>
+                  </span>
                 </button>
               ))}
             </div>
 
-
-            {form.payment === "pix" && (
+            {form.payment === "pix_now" && (
               <div className="mt-4 rounded-3xl border border-amber-200 bg-amber-50/70 p-4">
                 <div className="flex items-start gap-4">
-                  {pixQrUrl && <img src={pixQrUrl} alt="QR Code Pix" className="size-32 rounded-2xl border bg-white p-2" />}
+                  {pixQrUrl && <img src={pixQrUrl} alt="QR Code Pix" className="size-28 rounded-2xl border bg-white p-2 sm:size-32" />}
                   <div className="min-w-0 flex-1">
-                    <p className="font-bold text-amber-950">Pague antes do preparo</p>
-                    <p className="mt-1 text-xs leading-relaxed text-amber-900/70">Escaneie o QR Code ou copie o código Pix. O pedido fica aguardando confirmação do pagamento e nunca será cobrado na entrega.</p>
+                    <p className="font-bold text-amber-950">Pix antecipado</p>
+                    <p className="mt-1 text-xs leading-relaxed text-amber-900/70">
+                      Use apenas se preferir pagar agora. Seu pedido ficará aguardando a confirmação do Pix antes do preparo.
+                    </p>
                     <button type="button" onClick={copyPixCode} className="mt-3 inline-flex items-center gap-2 rounded-full bg-black px-4 py-2 text-xs font-bold text-white">
                       <Copy className="size-3.5" /> Copiar código Pix
                     </button>
@@ -756,17 +1077,18 @@ function CustomerHome() {
               </div>
             )}
 
-            {form.payment === "cash" && (
-              <div className="mt-4 rounded-3xl border border-red-200 bg-red-50 p-4 text-sm">
-                <p className="font-bold text-red-950">Pagamento em dinheiro é antecipado</p>
-                <p className="mt-1 text-xs leading-relaxed text-red-900/70">O pedido será criado como aguardando pagamento. A loja precisa confirmar o recebimento antes do preparo. Não existe pagamento em dinheiro na entrega.</p>
+            {form.payment === "card_online" && (
+              <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
+                <ShieldCheck className="mt-0.5 size-4 shrink-0" />
+                Você será direcionado ao checkout seguro do Stripe. A Hotbox não recebe os dados do seu cartão.
               </div>
             )}
 
-            {form.payment === "card" && (
-              <p className="mt-3 text-xs text-muted-foreground">
-                Você será redirecionado para o checkout seguro do Stripe. O pedido só entra no fluxo operacional depois que o Stripe confirmar o pagamento.
-              </p>
+            {(form.payment === "card_delivery" || form.payment === "pix_delivery") && (
+              <div className="mt-4 flex items-start gap-2 rounded-2xl border border-sky-200 bg-sky-50 p-3 text-xs leading-relaxed text-sky-900">
+                <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+                Seu pedido entra normalmente no sistema e você paga somente no momento da entrega.
+              </div>
             )}
           </div>
         </div>
@@ -778,7 +1100,7 @@ function CustomerHome() {
               disabled={placing}
               className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
             >
-              <span>{placing ? "Processando..." : form.payment === "card" ? "Ir para pagamento" : "Criar pedido"}</span>
+              <span>{placing ? "Processando..." : form.payment === "card_online" ? "Ir para pagamento seguro" : "Confirmar pedido"}</span>
               <span>{brl(total)}</span>
             </Button>
           </div>
@@ -790,19 +1112,22 @@ function CustomerHome() {
   return (
     <div className="min-h-screen bg-[#f7f7f7] pb-28">
       <div className="sticky top-0 z-50 border-b border-black/5 bg-white/95 px-4 py-3 backdrop-blur">
-        <div className="mx-auto max-w-2xl">
-          <Link to="/" className="flex items-center gap-2.5">
-            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-14 w-14 rounded-2xl object-contain shadow-sm ring-1 ring-black/10" />
-            <div className="leading-tight">
-              <p className="font-display text-lg font-black">
-                HOT<span className="text-[#d92d20]">BOX</span>
-              </p>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-[#d92d20]">Delivery</p>
+        <div className="mx-auto flex max-w-2xl items-center gap-3">
+          <Link to="/" className="flex min-w-0 items-center gap-2.5">
+            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-12 w-12 rounded-2xl object-contain shadow-sm ring-1 ring-black/10" />
+            <div className="min-w-0 leading-tight">
+              <p className="font-display text-lg font-black">HOT<span className="text-[#d92d20]">BOX</span></p>
+              <p className="truncate text-[10px] font-bold uppercase tracking-widest text-[#d92d20]">{validatedNeighborhood || "Delivery"}</p>
             </div>
-            <Link to="/admin/login" className="ml-auto text-[11px] text-muted-foreground hover:text-foreground">
-              Área da loja
-            </Link>
           </Link>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button type="button" onClick={resetAreaAccess} title="Trocar endereço" className="grid size-9 place-items-center rounded-full border bg-white text-muted-foreground transition hover:text-foreground">
+              <MapPin className="size-4" />
+            </button>
+            <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" title="Ajuda pelo WhatsApp" className="grid size-9 place-items-center rounded-full bg-[#25D366] text-white shadow-sm">
+              <MessageCircle className="size-4" />
+            </a>
+          </div>
         </div>
       </div>
 
@@ -836,7 +1161,7 @@ function CustomerHome() {
               </span>
             )}
             <span className="flex items-center gap-1.5">
-              <MapPin className="size-4" /> Entrega {deliveryFee > 0 ? brl(deliveryFee) : "grátis"}
+              <MapPin className="size-4" /> {validatedNeighborhood || "Entrega"} · {deliveryFee > 0 ? brl(deliveryFee) : "grátis"}
             </span>
           </div>
         </div>
@@ -935,7 +1260,7 @@ function CustomerHome() {
                       className="flex w-full items-center gap-4 rounded-[24px] border border-black/5 bg-white p-3.5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
                     >
                       {p.image_url ? (
-                        <img src={p.image_url} alt={p.name} className="size-24 shrink-0 rounded-2xl object-cover" />
+                        <img src={p.image_url} alt={p.name} className="size-24 shrink-0 rounded-2xl object-contain" />
                       ) : (
                         <div className="grid size-16 shrink-0 place-items-center rounded-xl bg-muted text-[9px] text-muted-foreground">
                           Sem foto
