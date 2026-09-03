@@ -61,12 +61,11 @@ type Product = {
 type CartItem = { product: Product; qty: number; notes: string };
 type View = "list" | "detail" | "cart" | "checkout";
 type ActiveFilter = "ativos" | "inativos" | "todos";
-type CheckoutPayment = "stripe_card" | "stripe_pix";
+type CheckoutPayment = "infinitepay";
 type AreaStatus = "idle" | "checking" | "supported" | "unsupported" | "error";
 
 const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
 const WHATSAPP_URL = "https://wa.me/5521984296288?text=" + encodeURIComponent("Olá! Preciso de ajuda com meu pedido no cardápio digital da Hotbox.");
-const IFOOD_URL = "https://www.ifood.com.br/delivery/duque-de-caxias-rj/hotbox-delivery-jardim-gramacho/812f264d-658d-4e54-88d1-ac4f6d040916";
 const NFOOD_URL = "https://oia.99app.com/dlp9/3SsCkm?area=BR";
 
 const MY_ORDERS_KEY = "hb_my_orders";
@@ -93,8 +92,8 @@ function CustomerHome() {
     "Batatas recheadas, hambúrgueres artesanais e porções irresistíveis. Direto do forno pra sua casa.",
   );
   const [deliveryTime, setDeliveryTime] = useState<number | null>(null);
-  const [stripeEnabled, setStripeEnabled] = useState(false);
-  const [stripePixEnabled, setStripePixEnabled] = useState(false);
+  const [infinitepayEnabled, setInfinitepayEnabled] = useState(false);
+  const [ifoodStoreLink, setIfoodStoreLink] = useState("");
   const [pixEnabled, setPixEnabled] = useState(true);
   const [cardEnabled, setCardEnabled] = useState(true);
   const [digitalMenuEnabled, setDigitalMenuEnabled] = useState(true);
@@ -131,7 +130,7 @@ function CustomerHome() {
     neighborhood: "",
     city: "",
     cep: "",
-    payment: "stripe_card" as CheckoutPayment,
+    payment: "infinitepay" as CheckoutPayment,
   });
 
   useEffect(() => {
@@ -146,7 +145,7 @@ function CustomerHome() {
     supabase
       .from("store_config_public")
       .select(
-        "store_name,default_delivery_fee,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,stripe_pix_enabled,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
+        "store_name,default_delivery_fee,estimated_delivery_time_minutes,banner_image_url,banner_tagline,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled,infinitepay_enabled,ifood_store_link",
       )
       .maybeSingle()
       .then(({ data }) => {
@@ -155,8 +154,8 @@ function CustomerHome() {
           setDeliveryFee(Number(data.default_delivery_fee ?? 0));
           setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
           setBannerUrl(data.banner_image_url ?? null);
-          setStripeEnabled((data as any).stripe_enabled === true);
-          setStripePixEnabled((data as any).stripe_pix_enabled === true);
+          setInfinitepayEnabled((data as any).infinitepay_enabled === true);
+          setIfoodStoreLink(String((data as any).ifood_store_link || ""));
           setDigitalMenuEnabled((data as any).digital_menu_enabled !== false);
           setPixEnabled((data as any).digital_menu_pix_enabled !== false);
           setCardEnabled((data as any).digital_menu_card_enabled !== false);
@@ -167,16 +166,19 @@ function CustomerHome() {
   }, []);
 
   useEffect(() => {
-    const available = [
-      cardEnabled && stripeEnabled ? "stripe_card" : null,
-      pixEnabled && stripeEnabled && stripePixEnabled ? "stripe_pix" : null,
-    ].filter(Boolean) as CheckoutPayment[];
-    if (!available.includes(form.payment) && available[0]) {
-      setForm((current) => ({ ...current, payment: available[0] }));
+    if (form.payment !== "infinitepay") setForm((current) => ({ ...current, payment: "infinitepay" }));
+  }, [form.payment]);
+
+
+
+  function redirectOutsideArea() {
+    const target = ifoodStoreLink.trim();
+    if (target) {
+      window.location.replace(target);
+      return;
     }
-  }, [pixEnabled, cardEnabled, stripeEnabled, stripePixEnabled]);
-
-
+    window.location.replace(WHATSAPP_URL);
+  }
   async function checkDeliveryArea(neighborhood: string, street?: string) {
     const { data, error } = await (supabase as any).rpc("check_delivery_area_public", {
       p_neighborhood: neighborhood,
@@ -221,8 +223,7 @@ function CustomerHome() {
       const quote = await checkDeliveryArea(address.bairro, address.logradouro || undefined);
       if (!quote?.supported) {
         setValidatedNeighborhood(address.bairro);
-        setAreaStatus("unsupported");
-        setAreaMessage(`No momento a entrega própria não atende ${address.bairro}.`);
+        redirectOutsideArea();
         return;
       }
       const fee = Number(quote.fee ?? deliveryFee ?? 0);
@@ -259,7 +260,8 @@ function CustomerHome() {
       const quote = await checkDeliveryArea(neighborhood);
       if (!quote?.supported) {
         setValidatedNeighborhood(neighborhood);
-        setAreaStatus("unsupported");
+        redirectOutsideArea();
+        return;
         setAreaMessage(`No momento a entrega própria não atende ${neighborhood}.`);
         return;
       }
@@ -419,8 +421,7 @@ function CustomerHome() {
     if (!form.name || !form.phone) return toast.error("Preencha nome e telefone");
     if (isDelivery && (!form.street || !form.number || !form.neighborhood)) return toast.error("Preencha rua, número e bairro");
     if (isDelivery && areaStatus !== "supported") return toast.error("Valide sua área de entrega antes de finalizar");
-    if (!stripeEnabled) return toast.error("Pagamento online indisponível no momento");
-    if (form.payment === "stripe_pix" && !stripePixEnabled) return toast.error("Pix via Stripe indisponível no momento");
+    if (!infinitepayEnabled) return toast.error("Pagamento online indisponível no momento");
 
     setPlacing(true);
     try {
@@ -444,21 +445,20 @@ function CustomerHome() {
       if ("error" in created && created.error) throw new Error(created.error);
       if (!("checkout" in created) || !created.checkout?.id) throw new Error("Checkout não criado");
 
-      const { createStripeSiteCheckout } = await import("@/lib/stripe.functions");
-      const stripe = await createStripeSiteCheckout({
+      const { createInfinitePayCheckout } = await import("@/lib/infinitepay.functions");
+      const payment = await createInfinitePayCheckout({
         data: { checkoutId: created.checkout.id, origin: window.location.origin },
       });
-      if (!("url" in stripe) || !stripe.url) throw new Error(("error" in stripe && stripe.error) || "Falha ao abrir o Stripe");
+      if (!("url" in payment) || !payment.url) throw new Error(("error" in payment && payment.error) || "Não foi possível abrir o pagamento");
 
       setCart([]);
       removeCoupon();
-      window.location.href = stripe.url;
+      window.location.href = payment.url;
     } catch (err: any) {
       console.error(err);
       const message = String(err?.message || "Não foi possível iniciar o pagamento.");
       if (/fora da área|fora da area|bairro|entrega/i.test(message)) {
-        setAreaStatus("unsupported");
-        setAreaMessage("Esse endereço não está disponível para entrega própria no momento.");
+        redirectOutsideArea();
       }
       toast.error(message);
     } finally {
@@ -587,7 +587,7 @@ function CustomerHome() {
                   Você não precisa desistir do pedido. Para regiões mais distantes, confira a disponibilidade pelas plataformas parceiras.
                 </p>
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  <a href={IFOOD_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ea1d2c] px-4 py-3 text-center text-sm font-black text-white">Pedir pelo iFood</a>
+                  <a href={ifoodStoreLink || WHATSAPP_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ea1d2c] px-4 py-3 text-center text-sm font-black text-white">Pedir pelo iFood</a>
                   <a href={NFOOD_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ff7a00] px-4 py-3 text-center text-sm font-black text-white">Pedir pela 99Food</a>
                 </div>
                 <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" className="mt-2 flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold">
@@ -979,43 +979,22 @@ function CustomerHome() {
               </p>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
-              {[
-                ...(cardEnabled && stripeEnabled ? [{ v: "stripe_card" as CheckoutPayment, label: "Cartão de crédito ou débito", helper: "Pagamento online seguro", icon: CreditCard }] : []),
-                ...(pixEnabled && stripeEnabled && stripePixEnabled ? [{ v: "stripe_pix" as CheckoutPayment, label: "Pix", helper: "QR Code com confirmação automática", icon: QrCode }] : []),
-              ].map((opt) => (
-                <button
-                  type="button"
-                  key={opt.v}
-                  onClick={() => setForm({ ...form, payment: opt.v })}
-                  className={`flex items-center gap-3 rounded-2xl border-2 p-3 text-left transition ${form.payment === opt.v ? "border-primary bg-primary/5 shadow-sm" : "border-border bg-background"}`}
-                >
-                  <span className={`grid size-10 shrink-0 place-items-center rounded-xl ${form.payment === opt.v ? "bg-primary text-primary-foreground" : "bg-muted text-foreground/60"}`}>
-                    <opt.icon className="size-5" />
-                  </span>
-                  <span>
-                    <span className="block text-sm font-black">{opt.label}</span>
-                    <span className="block text-[11px] text-muted-foreground">{opt.helper}</span>
-                  </span>
-                </button>
-              ))}
+            <div className="rounded-2xl border-2 border-primary bg-primary/5 p-4">
+              <div className="flex items-center gap-3">
+                <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground"><ShieldCheck className="size-5" /></span>
+                <div>
+                  <p className="text-sm font-black">Pix ou cartão</p>
+                  <p className="text-[11px] text-muted-foreground">Pagamento seguro pela InfinitePay</p>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
+                <div className="flex items-center gap-2 rounded-xl bg-white p-2"><QrCode className="size-4" /> Pix com QR Code</div>
+                <div className="flex items-center gap-2 rounded-xl bg-white p-2"><CreditCard className="size-4" /> Cartão de crédito</div>
+              </div>
+              <p className="mt-3 text-xs leading-relaxed text-emerald-900">Na próxima tela você escolhe Pix ou cartão. Seu pedido só entra em preparo depois da confirmação do pagamento.</p>
             </div>
 
-            {form.payment === "stripe_pix" && (
-              <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
-                <QrCode className="mt-0.5 size-4 shrink-0" />
-                Na próxima tela você verá o QR Code Pix com o valor exato do seu pedido. Assim que o pagamento for identificado, confirmaremos seu pedido automaticamente.
-              </div>
-            )}
-
-            {form.payment === "stripe_card" && (
-              <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-relaxed text-emerald-900">
-                <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-                Você será direcionado para uma página segura de pagamento. Assim que o cartão for aprovado, seu pedido será confirmado automaticamente.
-              </div>
-            )}
-
-            {!stripeEnabled && (
+            {!infinitepayEnabled && (
               <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-900">
                 Pagamento online temporariamente indisponível. Fale conosco pelo WhatsApp para fazer seu pedido.
               </div>
