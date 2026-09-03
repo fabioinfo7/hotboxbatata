@@ -418,8 +418,8 @@ function OrdersDashboard() {
                     </td>
                     <td className="p-2 text-xs uppercase">
                       <div>{o.payment_method}</div>
-                      {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "stripe" && (
-                        <div className="mt-1 text-[10px] font-extrabold text-emerald-700">PAGAMENTO CONFIRMADO VIA STRIPE</div>
+                      {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "infinitepay" && (
+                        <div className="mt-1 text-[10px] font-extrabold text-emerald-700">PAGAMENTO CONFIRMADO VIA INFINITEPAY</div>
                       )}
                     </td>
                     <td className="p-2 text-right font-bold text-primary">{brl(o.total)}</td>
@@ -575,9 +575,9 @@ function OrdersDashboard() {
                         {o.payment_method === "pix" ? "Pix" : o.payment_method === "cash" ? "Dinheiro" : "Cartão"}
                       </span>
                     </div>
-                    {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "stripe" && (
+                    {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "infinitepay" && (
                       <div className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] font-extrabold text-emerald-700">
-                        <CheckCircle2 className="size-3.5" /> PAGAMENTO CONFIRMADO VIA STRIPE
+                        <CheckCircle2 className="size-3.5" /> PAGAMENTO CONFIRMADO VIA INFINITEPAY
                       </div>
                     )}
 
