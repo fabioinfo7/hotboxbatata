@@ -27,6 +27,7 @@ import {
   UtensilsCrossed,
   LayoutGrid,
   List,
+  Gift,
   PackagePlus,
   Store,
 } from "lucide-react";
@@ -63,13 +64,13 @@ type Order = {
   customer_cancel_reason: string | null;
   payment_status: string;
   payment_timing: string | null;
-  payment_confirmed_by: string | null;
   delivery_mode: string;
   external_display_id: string | null;
   order_timing: string | null;
   scheduled_start_at: string | null;
   ifood_driver_assigned_at: string | null;
   nfood_driver_assigned_at: string | null;
+  loyalty_reward_used?: boolean;
 };
 
 function statusLabelFor(o: Order): string {
@@ -416,12 +417,7 @@ function OrdersDashboard() {
                     <td className="max-w-[260px] p-2 text-xs">
                       {o.address_street ? `${o.address_street}, ${o.address_number}` : "—"}
                     </td>
-                    <td className="p-2 text-xs uppercase">
-                      <div>{o.payment_method}</div>
-                      {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "infinitepay" && (
-                        <div className="mt-1 text-[10px] font-extrabold text-emerald-700">PAGAMENTO CONFIRMADO VIA INFINITEPAY</div>
-                      )}
-                    </td>
+                    <td className="p-2 text-xs uppercase">{o.payment_method}</td>
                     <td className="p-2 text-right font-bold text-primary">{brl(o.total)}</td>
                     <td className="flex items-center gap-1 p-2">
                       <Link to="/loja/pedido/$id" params={{ id: o.id }} search={{}}>
@@ -479,6 +475,11 @@ function OrdersDashboard() {
                 key={o.id}
                 className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${customerHasUnread ? "customer-message-pulse border-2 border-emerald-500" : platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
               >
+                {o.loyalty_reward_used && (
+                  <div className="flex items-center justify-center gap-2 bg-emerald-600 px-3 py-3 text-center text-sm font-black uppercase tracking-wide text-white shadow-inner">
+                    <Gift className="size-5" /> CLIENTE FIEL — TEM DIREITO A UMA BATATA GRÁTIS
+                  </div>
+                )}
                 {ifoodStuck && (
                   <div className="flex items-center justify-center gap-1.5 bg-red-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
                     <AlertCircle className="size-3.5 animate-pulse" /> Pedido iFood aguardando aceite há mais de 3 min!
@@ -575,11 +576,6 @@ function OrdersDashboard() {
                         {o.payment_method === "pix" ? "Pix" : o.payment_method === "cash" ? "Dinheiro" : "Cartão"}
                       </span>
                     </div>
-                    {o.source === "site" && o.payment_status === "paid" && o.payment_confirmed_by === "infinitepay" && (
-                      <div className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] font-extrabold text-emerald-700">
-                        <CheckCircle2 className="size-3.5" /> PAGAMENTO CONFIRMADO VIA INFINITEPAY
-                      </div>
-                    )}
 
                     {o.deliverer_name && (
                       <div className="flex items-center gap-1.5 rounded-lg bg-accent/15 px-2.5 py-1.5 text-[11px]">
