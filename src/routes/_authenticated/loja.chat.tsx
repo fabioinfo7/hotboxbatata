@@ -46,6 +46,7 @@ import {
   ImagePlus,
   ThumbsUp,
   Package,
+  Gift,
   MapPin,
   MoreHorizontal,
   AlertTriangle,
@@ -107,6 +108,7 @@ type ActiveOrder = {
   payment_method?: string | null; delivery_fee?: number | null; notes?: string | null;
   payment_status?: string | null; payment_timing?: string | null;
   assigned_operator_id?: string | null; assigned_operator_email?: string | null; assigned_operator_at?: string | null;
+  loyalty_reward_used?: boolean;
 };
 
 type GenerateOrderReview = {
@@ -280,7 +282,7 @@ function ChatPage() {
       supabase.from("whatsapp_conversations").select("*").order("last_message_at", { ascending: false }),
       supabase.from("leads").select("phone,tags"),
       (supabase as any).from("orders")
-        .select("id,customer_phone,customer_name,status,created_at,order_number,external_display_id,total,address_street,address_number,address_complement,address_neighborhood,address_city,payment_method,delivery_fee,notes,payment_status,payment_timing,assigned_operator_id,assigned_operator_email,assigned_operator_at")
+        .select("id,customer_phone,customer_name,status,created_at,order_number,external_display_id,total,address_street,address_number,address_complement,address_neighborhood,address_city,payment_method,delivery_fee,notes,payment_status,payment_timing,assigned_operator_id,assigned_operator_email,assigned_operator_at,loyalty_reward_used")
         .in("status", ["pending_review", "pending", "preparing", "ready_pickup", "out_for_delivery"])
         .order("created_at", { ascending: true }),
       (supabase as any).from("store_config").select("estimated_delivery_time_minutes").eq("id", 1).maybeSingle(),
@@ -2217,6 +2219,11 @@ function ActiveOrdersPanel({ orders, deliveryMinutes, now, onUpdateStatus, onCan
         const operatorLabel = order.assigned_operator_email || (isSelected && currentOperator?.email) || null;
         return (
           <div key={order.id} className={`mb-2 rounded-xl border bg-card p-3 shadow-sm transition ${hasUnread ? "order-card-unread border-emerald-500" : timer.late ? "border-red-400" : timer.near ? "border-amber-400" : isSelected ? "border-blue-400 ring-1 ring-blue-200" : "border-border/60"}`}>
+            {order.loyalty_reward_used && (
+              <div className="-mx-3 -mt-3 mb-3 flex items-center justify-center gap-1.5 rounded-t-xl bg-emerald-600 px-2 py-2 text-center text-[11px] font-black uppercase tracking-wide text-white">
+                <Gift className="size-4" /> CLIENTE FIEL — TEM DIREITO A UMA BATATA GRÁTIS
+              </div>
+            )}
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <p className="truncate text-sm font-extrabold">{order.customer_name || formatPhone(order.customer_phone)}</p>
