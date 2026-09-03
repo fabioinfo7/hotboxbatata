@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { brasiliaDateDaysAgo, brasiliaDateISO, brasiliaDayRange, brasiliaMonthStart } from "@/lib/brasilia-date";
+import { FinancialCashLedger } from "@/components/financial-cash-ledger";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -123,6 +124,7 @@ type Expense = {
   category: string;
   amount: number;
   due_date: string;
+  competence_date?: string | null;
   paid_at: string | null;
   is_paid: boolean;
   recurrence: string;
@@ -240,7 +242,7 @@ export default function FinanceiroPage() {
   }, [from, to]);
 
   const expensesInPeriod = useMemo(
-    () => expenses.filter((e) => e.due_date >= from && e.due_date <= to),
+    () => expenses.filter((e) => (e.competence_date || e.due_date) >= from && (e.competence_date || e.due_date) <= to),
     [expenses, from, to],
   );
 
@@ -596,7 +598,7 @@ export default function FinanceiroPage() {
               {
                 dashboard: "📊 Visão Geral",
                 despesas: "💸 Despesas",
-                fluxo: "📈 Fluxo de Caixa",
+                fluxo: "💳 Caixa",
                 relatorio: "🏆 Resultado",
                 ranking: "🔥 Mais Vendidos",
                 dizimo: "🙏 Dízimo",
@@ -862,7 +864,7 @@ export default function FinanceiroPage() {
                         checked={e.is_paid}
                         onCheckedChange={async (v) => {
                           await (supabase.from("expenses" as any) as any)
-                            .update({ is_paid: v, paid_at: v ? todayISO() : null })
+                            .update({ is_paid: v, paid_at: v ? new Date().toISOString() : null })
                             .eq("id", e.id);
                           load();
                         }}
@@ -899,6 +901,7 @@ export default function FinanceiroPage() {
 
       {tab === "fluxo" && (
         <div className="space-y-4">
+          <FinancialCashLedger from={from} to={to} />
           <Card className="p-4">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
               Fluxo de caixa realizado
@@ -929,8 +932,8 @@ export default function FinanceiroPage() {
 
           <Card className="p-4">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
-              Saldo acumulado
-              <Tooltip2 text="Como o caixa evolui no tempo." />
+              Acumulado do período
+              <Tooltip2 text="Evolução do movimento líquido dentro do período selecionado, começando em zero. Não representa sozinho o saldo bancário da empresa." />
             </div>
             {cashflowData.length > 0 &&
               (() => {
@@ -944,7 +947,7 @@ export default function FinanceiroPage() {
                     <AreaChart data={accumulated}>
                       <XAxis dataKey="dia" />
                       <YAxis tickFormatter={(v) => `R$${(v / 1000).toFixed(1)}k`} />
-                      <Tooltip formatter={(v) => [brl(Number(v)), "Saldo acumulado"]} />
+                      <Tooltip formatter={(v) => [brl(Number(v)), "Acumulado do período"]} />
                       <Area type="monotone" dataKey="saldo" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.2} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -1467,6 +1470,7 @@ function ExpenseForm({
     description: initial?.description ?? "",
     category: initial?.category ?? "outros",
     amount: initial?.amount ? String(initial.amount) : "",
+    competence_date: initial?.competence_date ?? initial?.due_date ?? todayISO(),
     due_date: initial?.due_date ?? todayISO(),
     is_paid: initial?.is_paid ?? false,
     recurrence: initial?.recurrence ?? "once",
@@ -1477,7 +1481,7 @@ function ExpenseForm({
   async function save() {
     if (!f.description || !f.amount || !f.due_date) return toast.error("Preencha os campos obrigatórios");
     setSaving(true);
-    const payload = { ...f, amount: Number(f.amount), paid_at: f.is_paid ? todayISO() : null };
+    const payload = { ...f, amount: Number(f.amount), paid_at: f.is_paid ? (initial?.paid_at || new Date().toISOString()) : null };
     const { error } = initial?.id
       ? await (supabase.from("expenses" as any) as any).update(payload).eq("id", initial.id)
       : await (supabase.from("expenses" as any) as any).insert(payload);
@@ -1530,10 +1534,16 @@ function ExpenseForm({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
+              <Label>Competência *</Label>
+              <Input type="date" value={f.competence_date} onChange={(e) => setF({ ...f, competence_date: e.target.value })} />
+              <p className="mt-1 text-[11px] text-muted-foreground">Data em que a despesa pertence ao resultado.</p>
+            </div>
+            <div>
               <Label>Data de vencimento *</Label>
               <Input type="date" value={f.due_date} onChange={(e) => setF({ ...f, due_date: e.target.value })} />
             </div>
-            <div>
+          </div>
+          <div>
               <Label>Repetição</Label>
               <Select value={f.recurrence} onValueChange={(v) => setF({ ...f, recurrence: v })}>
                 <SelectTrigger>
@@ -1545,7 +1555,6 @@ function ExpenseForm({
                   <SelectItem value="weekly">Toda semana</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
           </div>
           <div>
             <Label>Observação (opcional)</Label>
