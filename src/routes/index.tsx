@@ -275,7 +275,7 @@ function CustomerHome() {
       }));
       setAreaStatus("supported");
       setAreaMessage("");
-      toast.success("Seu bairro está na nossa área de entrega!");
+      toast.success("Pronto! Confira o cardápio disponível para você.");
     } catch (error) {
       console.error(error);
       setAreaStatus("error");
@@ -510,22 +510,20 @@ function CustomerHome() {
 
             {!outside ? (
               <>
-                <div className="mt-7 rounded-3xl bg-gradient-to-br from-amber-50 to-orange-50 p-5">
-                  <div className="flex items-start gap-3">
-                    <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#ffd400] text-black">
+                <div className="mt-6 rounded-3xl bg-gradient-to-br from-amber-50 to-orange-50 p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="grid size-10 shrink-0 place-items-center rounded-2xl bg-[#ffd400] text-black">
                       <MapPin className="size-5" />
                     </div>
                     <div>
-                      <h1 className="font-display text-2xl font-black leading-tight">Primeiro, vamos confirmar sua entrega</h1>
-                      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                        Informe seu CEP. Em poucos segundos verificamos o bairro, preenchemos parte do endereço e mostramos a taxa antes de você montar o pedido.
-                      </p>
+                      <h1 className="font-display text-xl font-black leading-tight">Veja o cardápio da sua região</h1>
+                      <p className="mt-0.5 text-sm text-muted-foreground">Informe seu CEP para ver produtos, ofertas e valores disponíveis para você.</p>
                     </div>
                   </div>
                 </div>
 
-                <div className="mt-6">
-                  <Label>CEP para entrega</Label>
+                <div className="mt-5">
+                  <Label>Seu CEP</Label>
                   <div className="mt-2 flex gap-2">
                     <Input
                       inputMode="numeric"
@@ -537,7 +535,7 @@ function CustomerHome() {
                       onKeyDown={(e) => { if (e.key === "Enter") void validateCepAccess(); }}
                     />
                     <Button onClick={validateCepAccess} disabled={areaStatus === "checking"} className="h-12 rounded-2xl px-5 font-black">
-                      {areaStatus === "checking" ? <Loader2 className="size-4 animate-spin" /> : "Verificar"}
+                      {areaStatus === "checking" ? <Loader2 className="size-4 animate-spin" /> : "Continuar"}
                     </Button>
                   </div>
                 </div>
