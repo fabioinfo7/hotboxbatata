@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { brasiliaDateDaysAgo, brasiliaDateISO, brasiliaMonthStart } from "@/lib/brasilia-date";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   ArrowLeft,
-  Banknote,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
@@ -22,8 +21,6 @@ import {
   QrCode,
   ReceiptText,
   RefreshCw,
-  ShieldCheck,
-  ShoppingBag,
   Trash2,
   WalletCards,
 } from "lucide-react";
@@ -124,15 +121,6 @@ function SummaryCard({ icon: Icon, label, value, helper }: { icon: any; label: s
   );
 }
 
-function DetailItem({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
-  return (
-    <div className="rounded-2xl border bg-muted/20 p-3">
-      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-muted-foreground">{label}</p>
-      <div className={`mt-1 break-words text-sm font-semibold ${mono ? "font-mono text-xs" : ""}`}>{value || "—"}</div>
-    </div>
-  );
-}
-
 function DigitalMenuFinancePage() {
   const [from, setFrom] = useState(brasiliaMonthStart());
   const [to, setTo] = useState(brasiliaDateISO());
@@ -141,7 +129,6 @@ function DigitalMenuFinancePage() {
   const [rows, setRows] = useState<Tx[]>([]);
   const [count, setCount] = useState(0);
   const [periodSummary, setPeriodSummary] = useState<Summary>({});
-  const [allTimeSummary, setAllTimeSummary] = useState<Summary>({});
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Tx | null>(null);
   const [editing, setEditing] = useState(false);
@@ -161,7 +148,6 @@ function DigitalMenuFinancePage() {
       setRows((res.rows || []) as Tx[]);
       setCount(Number(res.count || 0));
       setPeriodSummary((res.periodSummary || {}) as Summary);
-      setAllTimeSummary((res.allTimeSummary || {}) as Summary);
       setPage(Number(res.page || nextPage));
     } catch (err: any) {
       toast.error(String(err?.message || "Não foi possível carregar os recebimentos."));
@@ -257,8 +243,8 @@ function DigitalMenuFinancePage() {
               <WalletCards className="size-6" />
             </div>
             <div>
-              <h1 className="text-2xl font-black tracking-tight sm:text-3xl">Financeiro do Cardápio Digital</h1>
-              <p className="mt-1 text-sm text-muted-foreground">Recebimentos confirmados pela InfinitePay, conciliados com os pedidos da HotBox.</p>
+              <h1 className="text-2xl font-black tracking-tight sm:text-3xl">Recebimentos do Cardápio Digital</h1>
+              <p className="mt-1 text-sm text-muted-foreground">Detalhamento dos pagamentos do site. Estes valores fazem parte automaticamente do Financeiro Geral e do Fluxo de Caixa.</p>
             </div>
           </div>
         </div>
@@ -267,12 +253,10 @@ function DigitalMenuFinancePage() {
         </Button>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-3">
         <SummaryCard icon={CircleDollarSign} label="Total confirmado" value={brl(periodSummary.sales_total)} helper={`${Number(periodSummary.transactions || 0)} transações no período`} />
-        <SummaryCard icon={Banknote} label="Pago pelos clientes" value={brl(periodSummary.customer_paid_total)} helper="Valor retornado pela InfinitePay como paid_amount" />
         <SummaryCard icon={QrCode} label="Pix" value={brl(periodSummary.pix_total)} helper={`${Number(periodSummary.pix_count || 0)} pagamentos`} />
         <SummaryCard icon={CreditCard} label="Cartão" value={brl(periodSummary.card_total)} helper={`${Number(periodSummary.card_count || 0)} pagamentos`} />
-        <SummaryCard icon={ShoppingBag} label="Total acumulado" value={brl(allTimeSummary.sales_total)} helper="Soma histórica das vendas confirmadas pelo cardápio digital" />
       </div>
 
       <Card className="border-0 p-4 shadow-sm ring-1 ring-black/5 sm:p-5">
@@ -371,71 +355,112 @@ function DigitalMenuFinancePage() {
         </div>
       </Card>
 
-      <div className="flex items-start gap-2 rounded-2xl border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground">
-        <ShieldCheck className="mt-0.5 size-4 shrink-0 text-emerald-600" />
-        <p><b>Importante:</b> “Total acumulado” é a soma das vendas confirmadas que passaram pelo cardápio digital. A API pública do Checkout Integrado não informa o saldo bancário disponível da conta InfinitePay. Valores, NSU e status confirmados pelo provedor ficam protegidos contra edição; a edição abaixo altera somente referência e observação internas.</p>
-      </div>
-
       <Dialog open={!!selected} onOpenChange={(open) => { if (!open) setSelected(null); }}>
-        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-3xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto p-0 sm:max-w-2xl">
           {selected && (
             <>
-              <DialogHeader>
-                <DialogTitle className="flex items-center gap-2 text-xl"><ReceiptText className="size-5" /> Transação {orderRef(selected)}</DialogTitle>
-              </DialogHeader>
-
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <DetailItem label="Status" value="Pagamento confirmado" />
-                <DetailItem label="Data do pagamento" value={formatDate(selected.paid_at)} />
-                <DetailItem label="Forma" value={paymentLabel(selected)} />
-                <DetailItem label="Valor da venda" value={moneyFromCents(selected.infinitepay_amount_cents, selected.total)} />
-                <DetailItem label="Pago pelo cliente" value={moneyFromCents(selected.infinitepay_paid_amount_cents, selected.total)} />
-                <DetailItem label="Parcelas" value={selected.infinitepay_installments ? `${selected.infinitepay_installments}x` : "1x / não informado"} />
-                <DetailItem label="Cliente" value={selected.customer_name} />
-                <DetailItem label="Telefone" value={selected.customer_phone} />
-                <DetailItem label="Pedido" value={orderRef(selected)} />
-                <DetailItem label="Subtotal" value={brl(selected.subtotal)} />
-                <DetailItem label="Taxa de entrega" value={brl(selected.delivery_fee)} />
-                <DetailItem label="Desconto" value={brl(selected.coupon_discount)} />
-                <DetailItem label="Cupom" value={selected.coupon_code || "—"} />
-                <DetailItem label="Capture method" value={selected.infinitepay_capture_method || "—"} />
-                <DetailItem label="Verificado em" value={formatDate(selected.infinitepay_verified_at)} />
-                <DetailItem label="Transaction NSU" value={selected.infinitepay_transaction_nsu || "—"} mono />
-                <DetailItem label="Order NSU" value={selected.infinitepay_order_nsu || "—"} mono />
-                <DetailItem label="Invoice slug" value={selected.infinitepay_invoice_slug || "—"} mono />
-                <DetailItem label="Checkout ID" value={selected.id} mono />
-                <DetailItem label="Order ID" value={selected.order_id || "—"} mono />
-              </div>
-
-              {selected.infinitepay_receipt_url && (
-                <a href={selected.infinitepay_receipt_url} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-2xl border bg-emerald-50 p-4 text-sm font-black text-emerald-900 hover:bg-emerald-100">
-                  Abrir comprovante da InfinitePay <ExternalLink className="size-4" />
-                </a>
-              )}
-
-              <div className="rounded-2xl border p-4">
-                <div className="flex items-center justify-between gap-3"><div><p className="font-black">Informações internas</p><p className="text-xs text-muted-foreground">Esses campos não alteram o pagamento original.</p></div><Button variant="outline" size="sm" className="gap-2 rounded-xl" onClick={() => setEditing((v) => !v)}><Edit3 className="size-4" /> {editing ? "Cancelar" : "Editar"}</Button></div>
-                {editing ? (
-                  <div className="mt-4 space-y-3">
-                    <div><Label>Referência interna</Label><Input className="mt-1 rounded-xl" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Ex.: conferido no fechamento" /></div>
-                    <div><Label>Observação</Label><textarea className="mt-1 min-h-28 w-full rounded-xl border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anotação administrativa sobre esta transação" /></div>
-                    <Button className="rounded-xl" onClick={saveMeta} disabled={saving}>{saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}Salvar alterações</Button>
+              <div className="border-b bg-muted/20 px-6 pb-5 pt-6 sm:px-8">
+                <DialogHeader className="space-y-0 text-left">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-black uppercase tracking-[0.16em] text-primary">Transação {orderRef(selected)}</p>
+                      <DialogTitle className="mt-1 truncate text-2xl font-black tracking-tight sm:text-3xl">
+                        {selected.customer_name || "Cliente"}
+                      </DialogTitle>
+                      <p className="mt-1 text-sm text-muted-foreground">{selected.customer_phone || "Telefone não informado"}</p>
+                    </div>
+                    <div className="shrink-0 sm:text-right">
+                      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-muted-foreground">Data da transação</p>
+                      <p className="mt-1 text-sm font-bold">{formatDate(selected.paid_at)}</p>
+                    </div>
                   </div>
-                ) : (
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2"><DetailItem label="Referência" value={selected.finance_reference || "—"} /><DetailItem label="Observação" value={selected.finance_note || "—"} /></div>
-                )}
+                </DialogHeader>
               </div>
 
-              <details className="rounded-2xl border p-4">
-                <summary className="cursor-pointer text-sm font-black">Dados técnicos recebidos da InfinitePay</summary>
-                <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                  <pre className="max-h-60 overflow-auto rounded-xl bg-muted p-3 text-[10px] leading-relaxed">{JSON.stringify(selected.infinitepay_webhook_payload || {}, null, 2)}</pre>
-                  <pre className="max-h-60 overflow-auto rounded-xl bg-muted p-3 text-[10px] leading-relaxed">{JSON.stringify(selected.infinitepay_verification_payload || {}, null, 2)}</pre>
-                </div>
-              </details>
+              <div className="space-y-7 px-6 py-6 sm:px-8">
+                <section>
+                  <div className="mb-3 flex items-center justify-between gap-4">
+                    <h3 className="text-xs font-black uppercase tracking-[0.16em] text-muted-foreground">Pagamento</h3>
+                    <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">Confirmado</span>
+                  </div>
+                  <div className="divide-y border-y">
+                    <div className="flex items-center justify-between gap-5 py-3.5">
+                      <span className="text-sm text-muted-foreground">Forma de pagamento</span>
+                      <span className="text-sm font-bold">{paymentLabel(selected)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-5 py-3.5">
+                      <span className="text-sm text-muted-foreground">Valor da venda</span>
+                      <span className="text-lg font-black">{moneyFromCents(selected.infinitepay_amount_cents, selected.total)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-5 py-3.5">
+                      <span className="text-sm text-muted-foreground">Pago pelo cliente</span>
+                      <span className="text-sm font-bold">{moneyFromCents(selected.infinitepay_paid_amount_cents, selected.total)}</span>
+                    </div>
+                  </div>
+                </section>
 
-              <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
-                <Button variant="destructive" className="gap-2 rounded-xl" onClick={hideRecord} disabled={saving}><Trash2 className="size-4" /> Excluir da lista</Button>
+                <section>
+                  <h3 className="mb-3 text-xs font-black uppercase tracking-[0.16em] text-muted-foreground">Composição do valor</h3>
+                  <div className="divide-y border-y">
+                    <div className="flex items-center justify-between gap-5 py-3">
+                      <span className="text-sm text-muted-foreground">Subtotal</span>
+                      <span className="text-sm font-bold">{brl(selected.subtotal)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-5 py-3">
+                      <span className="text-sm text-muted-foreground">Taxa de entrega</span>
+                      <span className="text-sm font-bold">{brl(selected.delivery_fee)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-5 py-3">
+                      <span className="text-sm text-muted-foreground">Desconto</span>
+                      <span className="text-sm font-bold">{brl(selected.coupon_discount)}</span>
+                    </div>
+                    {selected.coupon_code && (
+                      <div className="flex items-center justify-between gap-5 py-3">
+                        <span className="text-sm text-muted-foreground">Cupom</span>
+                        <span className="text-sm font-bold">{selected.coupon_code}</span>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {selected.infinitepay_receipt_url && (
+                  <a
+                    href={selected.infinitepay_receipt_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center justify-between border-y py-4 text-sm font-black text-emerald-700 transition-colors hover:text-emerald-800"
+                  >
+                    Abrir comprovante da InfinitePay <ExternalLink className="size-4" />
+                  </a>
+                )}
+
+                <section>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-[0.16em] text-muted-foreground">Informações internas</h3>
+                      <p className="mt-1 text-xs text-muted-foreground">Anotações administrativas. Não alteram o pagamento.</p>
+                    </div>
+                    <Button variant="outline" size="sm" className="gap-2 rounded-xl" onClick={() => setEditing((v) => !v)}>
+                      <Edit3 className="size-4" /> {editing ? "Cancelar" : "Editar"}
+                    </Button>
+                  </div>
+                  {editing ? (
+                    <div className="mt-4 space-y-3 border-t pt-4">
+                      <div><Label>Referência interna</Label><Input className="mt-1 rounded-xl" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Ex.: conferido no fechamento" /></div>
+                      <div><Label>Observação</Label><textarea className="mt-1 min-h-28 w-full rounded-xl border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anotação administrativa sobre esta transação" /></div>
+                      <Button className="rounded-xl" onClick={saveMeta} disabled={saving}>{saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}Salvar alterações</Button>
+                    </div>
+                  ) : (
+                    <div className="mt-4 divide-y border-y">
+                      <div className="grid gap-1 py-3 sm:grid-cols-[150px_1fr] sm:gap-5"><span className="text-sm text-muted-foreground">Referência</span><span className="text-sm font-semibold">{selected.finance_reference || "—"}</span></div>
+                      <div className="grid gap-1 py-3 sm:grid-cols-[150px_1fr] sm:gap-5"><span className="text-sm text-muted-foreground">Observação</span><span className="whitespace-pre-wrap text-sm font-semibold">{selected.finance_note || "—"}</span></div>
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              <DialogFooter className="border-t px-6 py-4 sm:px-8 sm:justify-between">
+                <Button variant="ghost" className="gap-2 text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={hideRecord} disabled={saving}><Trash2 className="size-4" /> Excluir da lista</Button>
                 <Button variant="outline" className="rounded-xl" onClick={() => setSelected(null)}>Fechar</Button>
               </DialogFooter>
             </>
