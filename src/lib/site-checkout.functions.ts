@@ -15,6 +15,7 @@ type CheckoutInput = {
   address_cep?: string | null;
   payment_kind: SitePaymentKind;
   coupon_code?: string | null;
+  access_token?: string | null;
   items: Array<{ product_id: string; qty: number; notes?: string | null }>;
 };
 
@@ -26,6 +27,11 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
   .inputValidator((data: CheckoutInput) => data)
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    let customerUser: any = null;
+    if (data.access_token) {
+      const { data: authData } = await supabaseAdmin.auth.getUser(data.access_token);
+      customerUser = authData?.user ?? null;
+    }
     const name = String(data.customer_name || "").trim();
     const phone = digits(data.customer_phone);
     if (!name) return { error: "Informe o nome de quem vai receber." };
@@ -60,7 +66,7 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
     const requestedIds = Array.from(new Set(data.items.map((i) => String(i.product_id || "")).filter(Boolean)));
     const { data: products, error: productError } = await supabaseAdmin
       .from("products")
-      .select("id,name,sale_price,active,promotion_active,promotion_price,promotion_type,promotion_start_at,promotion_end_at,promotion_days_of_week,promotion_time_start,promotion_time_end")
+      .select("id,name,sale_price,active,promotion_active,promotion_price,promotion_type,promotion_start_at,promotion_end_at,promotion_days_of_week,promotion_time_start,promotion_time_end,loyalty_eligible")
       .in("id", requestedIds)
       .eq("active", true);
     if (productError) return { error: "Não foi possível validar os produtos." };
@@ -87,16 +93,38 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
     const subtotal = Number(serverItems.reduce((sum, i) => sum + i.unit_price * i.qty, 0).toFixed(2));
     let discount = 0;
     let couponCode: string | null = null;
-    if (String(data.coupon_code || "").trim()) {
-      const { data: quote, error: couponError } = await supabaseAdmin.rpc("validate_coupon_public", {
-        p_code: String(data.coupon_code).trim(),
-        p_subtotal: subtotal,
-        p_customer_phone: phone,
-        p_cart: serverItems,
-      });
-      if (couponError || !quote?.ok) return { error: String(quote?.reason || couponError?.message || "Cupom inválido") };
-      discount = Number(quote?.discount ?? 0) || 0;
-      couponCode = String(quote?.code || data.coupon_code).trim().toUpperCase();
+    let loyaltyRewardId: string | null = null;
+    const requestedCoupon = String(data.coupon_code || "").trim().toUpperCase();
+    if (customerUser) await (supabaseAdmin as any).rpc("release_stale_loyalty_rewards", { p_user_id: customerUser.id });
+    if (requestedCoupon) {
+      const { data: reward } = await (supabaseAdmin as any)
+        .from("loyalty_rewards")
+        .select("id,code,status,user_id")
+        .ilike("code", requestedCoupon)
+        .maybeSingle();
+
+      if (reward) {
+        if (!customerUser || reward.user_id !== customerUser.id) return { error: "Entre na conta do Clube HotBox dona deste cupom para usá-lo." };
+        if (reward.status !== "available") return { error: "Este cupom de fidelidade já está sendo usado ou já foi resgatado." };
+        if (data.delivery_mode !== "delivery") return { error: "A batata grátis do Clube HotBox é válida em pedidos com entrega." };
+        const eligible = serverItems
+          .filter((item) => Boolean((byId.get(String(item.product_id)) as any)?.loyalty_eligible))
+          .sort((a, b) => Number(b.unit_price) - Number(a.unit_price))[0];
+        if (!eligible) return { error: "Adicione ao carrinho uma batata participante do Clube HotBox." };
+        discount = Number(eligible.unit_price || 0);
+        couponCode = String(reward.code).toUpperCase();
+        loyaltyRewardId = String(reward.id);
+      } else {
+        const { data: quote, error: couponError } = await supabaseAdmin.rpc("validate_coupon_public", {
+          p_code: requestedCoupon,
+          p_subtotal: subtotal,
+          p_customer_phone: phone,
+          p_cart: serverItems,
+        });
+        if (couponError || !quote?.ok) return { error: String(quote?.reason || couponError?.message || "Cupom inválido") };
+        discount = Number(quote?.discount ?? 0) || 0;
+        couponCode = String(quote?.code || requestedCoupon).trim().toUpperCase();
+      }
     }
 
     const total = Number((Math.max(0, subtotal - discount) + deliveryFee).toFixed(2));
@@ -114,6 +142,17 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
       address_cep: data.delivery_mode === "delivery" ? digits(data.address_cep) || null : null,
     };
 
+    if (customerUser) {
+      await (supabaseAdmin as any).from("customer_profiles").upsert({
+        user_id: customerUser.id,
+        full_name: name,
+        email: customerUser.email || null,
+        phone,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+      await (supabaseAdmin as any).from("loyalty_accounts").upsert({ user_id: customerUser.id }, { onConflict: "user_id", ignoreDuplicates: true });
+    }
+
     const { data: checkout, error: insertError } = await (supabaseAdmin as any)
       .from("site_checkout_sessions")
       .insert({
@@ -125,6 +164,8 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
         items: serverItems,
         coupon_code: couponCode,
         coupon_discount: discount,
+        customer_user_id: customerUser?.id || null,
+        loyalty_reward_id: loyaltyRewardId,
         subtotal,
         delivery_fee: deliveryFee,
         total,
@@ -133,6 +174,18 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
       .select("id,total,payment_kind,status")
       .single();
     if (insertError || !checkout) return { error: insertError?.message || "Não foi possível iniciar o checkout." };
+
+    if (loyaltyRewardId && customerUser) {
+      const { data: reserved, error: reserveError } = await (supabaseAdmin as any).rpc("reserve_loyalty_reward", {
+        p_reward_id: loyaltyRewardId,
+        p_checkout_id: checkout.id,
+        p_user_id: customerUser.id,
+      });
+      if (reserveError || reserved !== true) {
+        await (supabaseAdmin as any).from("site_checkout_sessions").delete().eq("id", checkout.id);
+        return { error: "Este cupom acabou de ser usado em outra compra. Atualize seu Clube HotBox." };
+      }
+    }
 
     return { checkout };
   });
@@ -170,3 +223,23 @@ export async function notifyPaidSiteOrder(supabaseAdmin: any, orderId: string) {
     console.error("[site-checkout] pagamento confirmado, mas aviso WhatsApp falhou", e);
   }
 }
+
+export const cancelSiteCheckout = createServerFn({ method: "POST" })
+  .inputValidator((data: { checkoutId: string; access_token?: string | null }) => data)
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    let userId: string | null = null;
+    if (data.access_token) {
+      const { data: authData } = await supabaseAdmin.auth.getUser(data.access_token);
+      userId = authData?.user?.id || null;
+    }
+    const { data: checkout } = await (supabaseAdmin as any)
+      .from("site_checkout_sessions")
+      .select("id,status,customer_user_id,loyalty_reward_id")
+      .eq("id", data.checkoutId)
+      .maybeSingle();
+    if (!checkout || checkout.status === "paid") return { ok: false } as const;
+    if (checkout.loyalty_reward_id && (!userId || checkout.customer_user_id !== userId)) return { ok: false } as const;
+    await (supabaseAdmin as any).from("site_checkout_sessions").update({ status: "cancelled", updated_at: new Date().toISOString() }).eq("id", checkout.id);
+    return { ok: true } as const;
+  });
