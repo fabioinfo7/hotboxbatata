@@ -2498,6 +2498,7 @@ function QuickRepliesPanel({
                   e.target.value = "";
                   if (f) await uploadQuickReplyImage(f);
                 }}
+                //
               />
               {formImageUrl ? (
                 <div className="relative w-fit">
