@@ -72,6 +72,46 @@ const WHATSAPP_URL = "https://wa.me/5521984296288?text=" + encodeURIComponent("O
 const NFOOD_URL = "https://oia.99app.com/dlp9/3SsCkm?area=BR";
 
 const MY_ORDERS_KEY = "hb_my_orders";
+const AREA_ACCESS_SESSION_KEY = "hb_area_access_session";
+
+type SavedAreaAccess = {
+  cep?: string;
+  street?: string;
+  neighborhood: string;
+  city?: string;
+  deliveryFee: number;
+  savedAt: number;
+};
+
+function saveAreaAccess(data: SavedAreaAccess) {
+  try {
+    sessionStorage.setItem(AREA_ACCESS_SESSION_KEY, JSON.stringify(data));
+  } catch {
+    /* sessionStorage indisponível */
+  }
+}
+
+function readAreaAccess(): SavedAreaAccess | null {
+  try {
+    const raw = sessionStorage.getItem(AREA_ACCESS_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SavedAreaAccess;
+    if (!parsed?.neighborhood || !Number.isFinite(Number(parsed.deliveryFee))) return null;
+    // Mantém a validação apenas durante a sessão atual do navegador.
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearAreaAccess() {
+  try {
+    sessionStorage.removeItem(AREA_ACCESS_SESSION_KEY);
+  } catch {
+    /* sessionStorage indisponível */
+  }
+}
+
 function pushMyOrder(id: string) {
   try {
     const raw = localStorage.getItem(MY_ORDERS_KEY);
@@ -141,6 +181,28 @@ function CustomerHome() {
     supabase.auth.getSession().then(({ data }) => setCustomerSession(data.session));
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setCustomerSession(session));
     return () => listener.subscription.unsubscribe();
+  }, []);
+
+  // O login OAuth do Google sai do site e volta para a página inicial.
+  // Preservamos a área que JÁ foi validada nesta mesma aba para não obrigar
+  // o cliente a digitar o CEP novamente depois de entrar no Clube HotBox.
+  useEffect(() => {
+    const saved = readAreaAccess();
+    if (!saved) return;
+    setAccessCep(saved.cep || "");
+    setValidatedNeighborhood(saved.neighborhood);
+    setDeliveryFee(Number(saved.deliveryFee || 0));
+    setForm((current) => ({
+      ...current,
+      deliveryMode: "delivery",
+      cep: saved.cep || current.cep,
+      street: saved.street || current.street,
+      neighborhood: saved.neighborhood,
+      city: saved.city || current.city,
+    }));
+    setManualAreaMode(false);
+    setAreaMessage("");
+    setAreaStatus("supported");
   }, []);
 
   useEffect(() => {
@@ -244,14 +306,23 @@ function CustomerHome() {
       const fee = Number(quote.fee ?? deliveryFee ?? 0);
       setDeliveryFee(Number.isFinite(fee) ? fee : 0);
       setValidatedNeighborhood(String(quote.neighborhood || address.bairro));
+      const supportedNeighborhood = String(quote.neighborhood || address.bairro);
       setForm((current) => ({
         ...current,
         deliveryMode: "delivery",
         cep,
         street: address.logradouro || current.street,
-        neighborhood: String(quote.neighborhood || address.bairro),
+        neighborhood: supportedNeighborhood,
         city: address.localidade || current.city,
       }));
+      saveAreaAccess({
+        cep,
+        street: address.logradouro || "",
+        neighborhood: supportedNeighborhood,
+        city: address.localidade || "",
+        deliveryFee: Number.isFinite(fee) ? fee : 0,
+        savedAt: Date.now(),
+      });
       setAreaStatus("supported");
       setAreaMessage("");
       toast.success("Entrega disponível para o seu endereço!");
@@ -283,11 +354,17 @@ function CustomerHome() {
       const fee = Number(quote.fee ?? deliveryFee ?? 0);
       setDeliveryFee(Number.isFinite(fee) ? fee : 0);
       setValidatedNeighborhood(String(quote.neighborhood || neighborhood));
+      const supportedNeighborhood = String(quote.neighborhood || neighborhood);
       setForm((current) => ({
         ...current,
         deliveryMode: "delivery",
-        neighborhood: String(quote.neighborhood || neighborhood),
+        neighborhood: supportedNeighborhood,
       }));
+      saveAreaAccess({
+        neighborhood: supportedNeighborhood,
+        deliveryFee: Number.isFinite(fee) ? fee : 0,
+        savedAt: Date.now(),
+      });
       setAreaStatus("supported");
       setAreaMessage("");
       toast.success("Pronto! Confira o cardápio disponível para você.");
@@ -299,6 +376,7 @@ function CustomerHome() {
   }
 
   function resetAreaAccess() {
+    clearAreaAccess();
     setAreaStatus("idle");
     setAreaMessage("");
     setValidatedNeighborhood("");
