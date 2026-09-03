@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getEffectivePrice } from "@/lib/promotions";
 
-export type SitePaymentKind = "stripe_card" | "stripe_pix";
+export type SitePaymentKind = "infinitepay";
 
 type CheckoutInput = {
   customer_name: string;
@@ -31,17 +31,15 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
     if (!name) return { error: "Informe o nome de quem vai receber." };
     if (phone.length < 10) return { error: "Informe um telefone válido." };
     if (!Array.isArray(data.items) || data.items.length === 0) return { error: "Seu carrinho está vazio." };
-    if (!(["stripe_card", "stripe_pix"] as string[]).includes(data.payment_kind)) return { error: "Forma de pagamento inválida." };
+    if (data.payment_kind !== "infinitepay") return { error: "Forma de pagamento inválida." };
 
     const { data: cfg } = await supabaseAdmin
       .from("store_config")
-      .select("stripe_enabled,stripe_pix_enabled,digital_menu_card_enabled,digital_menu_pix_enabled")
+      .select("infinitepay_enabled,digital_menu_card_enabled,digital_menu_pix_enabled")
       .eq("id", 1)
       .maybeSingle();
 
-    if (cfg?.stripe_enabled !== true) return { error: "Pagamento online indisponível no momento." };
-    if (data.payment_kind === "stripe_card" && cfg?.digital_menu_card_enabled === false) return { error: "Pagamento com cartão indisponível no momento." };
-    if (data.payment_kind === "stripe_pix" && (cfg?.digital_menu_pix_enabled === false || cfg?.stripe_pix_enabled === false)) return { error: "Pagamento via Pix Stripe indisponível no momento." };
+    if (cfg?.infinitepay_enabled !== true) return { error: "Pagamento online indisponível no momento." };
 
     let deliveryFee = 0;
     let normalizedNeighborhood = data.address_neighborhood || null;
@@ -163,7 +161,8 @@ export async function notifyPaidSiteOrder(supabaseAdmin: any, orderId: string) {
   const ref = order.external_display_id || order.order_number;
   const refText = ref ? ` #${String(ref).replace(/^#/, "")}` : "";
   const method = order.payment_method === "pix" ? "Pix" : "cartão";
-  const message = `✅ *Pagamento confirmado via Stripe*\n\nOlá, ${firstName}! O pagamento do pedido${refText} via ${method} foi confirmado. Seu pedido já entrou no sistema da Hotbox e seguirá para preparo. 🍟🔥\n\nVamos avisar por aqui cada etapa até a entrega.`;
+  const provider = order.payment_confirmed_by === "infinitepay" ? "InfinitePay" : "Stripe";
+  const message = `✅ *Pagamento confirmado via ${provider}*\n\nOlá, ${firstName}! O pagamento do pedido${refText} via ${method} foi confirmado. Seu pedido já entrou no sistema da Hotbox e seguirá para preparo. 🍟🔥\n\nVamos avisar por aqui cada etapa até a entrega.`;
   try {
     const { sendWhatsappText } = await import("@/lib/whatsapp-send.server");
     await sendWhatsappText(supabaseAdmin, order.customer_phone, message);
