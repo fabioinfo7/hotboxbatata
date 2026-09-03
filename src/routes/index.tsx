@@ -333,13 +333,18 @@ function CustomerHome() {
   async function applyCoupon() {
     const code = couponInput.trim().toUpperCase();
     if (!code) return;
+    const couponPhone = onlyDigits(form.phone);
+    if (couponPhone.length < 10) {
+      setCouponError("Informe seu WhatsApp para validar o cupom.");
+      return;
+    }
     setCheckingCoupon(true);
     setCouponError("");
     try {
       const { data, error } = await (supabase as any).rpc("validate_coupon_public", {
         p_code: code,
         p_subtotal: subtotal,
-        p_customer_phone: onlyDigits(form.phone),
+        p_customer_phone: couponPhone,
         p_cart: couponCartPayload(),
       });
       if (error) throw error;
@@ -367,11 +372,13 @@ function CustomerHome() {
 
   useEffect(() => {
     if (!appliedCoupon?.code || !cart.length) return;
+    const couponPhone = onlyDigits(form.phone);
+    if (couponPhone.length < 10) return;
     const timer = window.setTimeout(async () => {
       const { data, error } = await (supabase as any).rpc("validate_coupon_public", {
         p_code: appliedCoupon.code,
         p_subtotal: subtotal,
-        p_customer_phone: onlyDigits(form.phone),
+        p_customer_phone: couponPhone,
         p_cart: couponCartPayload(),
       });
       if (error || !data?.ok) {
@@ -781,20 +788,43 @@ function CustomerHome() {
                   </button>
                 </div>
               ) : (
-                <div className="mt-1.5 flex gap-2">
-                  <Input
-                    className="rounded-full uppercase"
-                    placeholder="Código do cupom"
-                    value={couponInput}
-                    onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                    onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
-                  />
-                  <Button variant="outline" className="rounded-full" onClick={applyCoupon} disabled={checkingCoupon}>
-                    Aplicar
-                  </Button>
+                <div className="mt-2 space-y-2.5">
+                  <div className="flex gap-2">
+                    <Input
+                      className="rounded-full uppercase"
+                      placeholder="Código do cupom"
+                      value={couponInput}
+                      onChange={(e) => {
+                        setCouponInput(e.target.value.toUpperCase());
+                        if (couponError) setCouponError("");
+                      }}
+                      onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
+                    />
+                    <Button variant="outline" className="rounded-full" onClick={applyCoupon} disabled={checkingCoupon}>
+                      {checkingCoupon ? <Loader2 className="size-4 animate-spin" /> : "Aplicar"}
+                    </Button>
+                  </div>
+                  <div className="rounded-2xl bg-muted/35 p-3">
+                    <Label className="text-xs font-bold">WhatsApp para validar o cupom</Label>
+                    <Input
+                      inputMode="tel"
+                      autoComplete="tel"
+                      className="mt-1.5 rounded-full bg-background"
+                      placeholder="(00) 00000-0000"
+                      value={formatPhone(form.phone)}
+                      onChange={(e) => {
+                        setForm((current) => ({ ...current, phone: e.target.value }));
+                        if (couponError) setCouponError("");
+                      }}
+                      onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
+                    />
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                      Usamos o número apenas para validar as regras do cupom. Ele já ficará preenchido na finalização do pedido.
+                    </p>
+                  </div>
                 </div>
               )}
-              {couponError && <p className="mt-1 text-xs font-semibold text-destructive">{couponError}</p>}
+              {couponError && <p className="mt-2 text-xs font-semibold text-destructive">{couponError}</p>}
 
               <div className="mt-3 flex justify-between text-sm text-foreground/70">
                 <span>Subtotal</span>
