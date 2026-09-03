@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { brl, formatDateTime } from "@/lib/formatters";
+import { brasiliaDateISO } from "@/lib/brasilia-date";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,7 +42,7 @@ type ReceivableItem = {
 
 type ProductOption = { id: string; name: string; sale_price: number; cost_price: number };
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => brasiliaDateISO();
 
 function emptyItem(): ReceivableItem {
   return { product_id: null, description: "", quantity: "1", unit_price: "", cost_price: "" };
@@ -259,7 +260,11 @@ function ReceivablesPage() {
   }
 
   async function remove(r: Receivable) {
-    if (!confirm(`Excluir lançamento de ${r.customer_name}?`)) return;
+    if (r.status === "paid") {
+      toast.error("Um recebimento já pago não deve ser apagado do histórico financeiro. Se houve devolução, registre uma saída/estorno no Caixa.");
+      return;
+    }
+    if (!confirm(`Excluir lançamento pendente de ${r.customer_name}?`)) return;
     const { error } = await supabase.from("receivables").delete().eq("id", r.id);
     if (error) {
       toast.error(error.message);
@@ -294,8 +299,7 @@ function ReceivablesPage() {
             <HandCoins className="size-6" /> Contas a Receber
           </h1>
           <p className="text-sm text-muted-foreground">
-            Valores que clientes pegaram para pagar depois — cada lançamento pode ter vários itens. Ao marcar como pago,
-            entra no caixa e no lucro real.
+            Valores previstos para receber. Enquanto estiver pendente, não entra no caixa. Ao marcar como pago, vira uma entrada realizada no Fluxo de Caixa sem duplicar o faturamento da venda.
           </p>
         </div>
         <Dialog
@@ -552,7 +556,7 @@ function ReceivablesPage() {
                     <Button size="sm" onClick={() => markPaid(r)}>
                       <CheckCircle2 className="size-4" /> Pago
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => remove(r)}>
+                    <Button size="sm" variant="ghost" onClick={() => remove(r)} title="Excluir lançamento pendente">
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
@@ -604,9 +608,7 @@ function ReceivablesPage() {
                   <Button size="sm" variant="outline" onClick={() => markPending(r)}>
                     Reabrir
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => remove(r)}>
-                    <Trash2 className="size-4" />
-                  </Button>
+
                 </div>
               </div>
             ))}
