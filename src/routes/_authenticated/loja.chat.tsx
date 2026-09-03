@@ -30,6 +30,7 @@ import {
   FileText,
   Check,
   CheckCheck,
+  CheckCircle2,
   Plus,
   Mic,
   MicOff,
@@ -104,7 +105,7 @@ type ActiveOrder = {
   address_street: string | null; address_number: string | null; address_complement: string | null;
   address_neighborhood: string | null; address_city: string | null;
   payment_method?: string | null; delivery_fee?: number | null; notes?: string | null;
-  payment_status?: string | null; payment_timing?: string | null; source?: string | null; payment_confirmed_by?: string | null;
+  payment_status?: string | null; payment_timing?: string | null;
   assigned_operator_id?: string | null; assigned_operator_email?: string | null; assigned_operator_at?: string | null;
 };
 
@@ -279,7 +280,7 @@ function ChatPage() {
       supabase.from("whatsapp_conversations").select("*").order("last_message_at", { ascending: false }),
       supabase.from("leads").select("phone,tags"),
       (supabase as any).from("orders")
-        .select("id,customer_phone,customer_name,status,created_at,order_number,external_display_id,total,address_street,address_number,address_complement,address_neighborhood,address_city,payment_method,delivery_fee,notes,payment_status,payment_timing,source,payment_confirmed_by,assigned_operator_id,assigned_operator_email,assigned_operator_at")
+        .select("id,customer_phone,customer_name,status,created_at,order_number,external_display_id,total,address_street,address_number,address_complement,address_neighborhood,address_city,payment_method,delivery_fee,notes,payment_status,payment_timing,assigned_operator_id,assigned_operator_email,assigned_operator_at")
         .in("status", ["pending_review", "pending", "preparing", "ready_pickup", "out_for_delivery"])
         .order("created_at", { ascending: true }),
       (supabase as any).from("store_config").select("estimated_delivery_time_minutes").eq("id", 1).maybeSingle(),
@@ -2256,11 +2257,6 @@ function ActiveOrdersPanel({ orders, deliveryMinutes, now, onUpdateStatus, onCan
               <span>{order.payment_method ? `Pagamento: ${order.payment_method === "pix" ? "Pix" : order.payment_method === "card" ? "Cartão" : order.payment_method}` : "Pagamento não informado"}</span>
               <strong>{order.total != null ? `R$ ${Number(order.total).toFixed(2).replace(".", ",")}` : "—"}</strong>
             </div>
-            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "infinitepay" && (
-              <div className="mt-1.5 flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[10px] font-extrabold text-emerald-700">
-                <CheckCircle2 className="size-3.5" /> PAGAMENTO CONFIRMADO VIA INFINITEPAY
-              </div>
-            )}
 
             <div className="mt-2 grid grid-cols-2 gap-1.5">
               {!["ready_pickup", "out_for_delivery"].includes(order.status) && <Button size="sm" variant="outline" className="h-8 border-emerald-300 text-[11px] font-bold text-emerald-700" onClick={() => onUpdateStatus(order.id, "ready_pickup")}>Pronto</Button>}
@@ -2498,7 +2494,6 @@ function QuickRepliesPanel({
                   e.target.value = "";
                   if (f) await uploadQuickReplyImage(f);
                 }}
-                //
               />
               {formImageUrl ? (
                 <div className="relative w-fit">
