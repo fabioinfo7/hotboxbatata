@@ -2,6 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { brasiliaDateISO } from "@/lib/brasilia-date";
 import { pushIfoodStatusFn } from "@/lib/ifood-push.functions";
 import { pushNfoodStatusFn } from "@/lib/nfood-push.functions";
 import { sendOrderArrivalNoticeFn } from "@/lib/order-notifications.functions";
@@ -288,7 +289,7 @@ function OrderDetail() {
   async function markPayLater() {
     const dueDate = window.prompt(
       "Data prevista para o pagamento (AAAA-MM-DD):",
-      new Date().toISOString().slice(0, 10),
+      brasiliaDateISO(),
     );
     if (!dueDate) return;
     try {
@@ -297,7 +298,8 @@ function OrderDetail() {
         .insert({
           customer_name: order.customer_name,
           description: `Pedido ${orderDisplayRef(order)} — pagar depois`,
-          purchase_date: new Date().toISOString().slice(0, 10),
+          purchase_date: brasiliaDateISO(),
+          order_id: id,
           due_date: dueDate,
           notes: order.notes ?? null,
         })
@@ -924,12 +926,12 @@ function OrderDetail() {
             </p>
             {order.payment_confirmed_by && (
               <p className="mt-1 text-xs text-muted-foreground">
-                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : order.payment_confirmed_by === "infinitepay" ? "InfinitePay — pagamento confirmado" : "Admin"}
+                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : order.payment_confirmed_by === "stripe" ? "Stripe — pagamento confirmado por webhook" : "Admin"}
               </p>
             )}
-            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "infinitepay" && (
+            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "stripe" && (
               <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700">
-                <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA INFINITEPAY
+                <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA STRIPE
               </div>
             )}
             {order.payment_receipt_url && (
