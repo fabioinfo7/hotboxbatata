@@ -1249,7 +1249,7 @@ function CustomerHome() {
           </Link>
         </div>
       </footer>
-
+//
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-card/95 backdrop-blur">
         <div className="mx-auto flex max-w-2xl items-stretch gap-2 px-3 py-2">
           <Link
