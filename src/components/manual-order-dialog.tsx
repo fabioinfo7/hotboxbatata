@@ -9,12 +9,13 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Plus, Trash2, PackagePlus } from "lucide-react";
 import { brl, onlyDigits } from "@/lib/formatters";
+import { brasiliaDateISO } from "@/lib/brasilia-date";
 
 type Product = { id: string; name: string; sale_price: number; cost_price: number };
 type Item = { product_id: string | null; product_name: string; quantity: number; unit_price: number; cost_price: number };
 type PaymentOption = "pix" | "card" | "later";
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => brasiliaDateISO();
 
 export function ManualOrderDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (o: boolean) => void; onCreated?: () => void }) {
   const [products, setProducts] = useState<Product[]>([]);
@@ -108,6 +109,7 @@ export function ManualOrderDialog({ open, onOpenChange, onCreated }: { open: boo
 
       if (payLater) {
         const { data: rec, error: recErr } = await supabase.from("receivables").insert({
+          order_id: order.id,
           customer_name: name.trim(),
           description: receivableDescription.trim() || `Pedido manual — ${items.length} item(ns)`,
           purchase_date: purchaseDate || todayStr(),
