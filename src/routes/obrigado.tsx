@@ -18,7 +18,8 @@ function ObrigadoPage() {
     const order_nsu = params.get("order_nsu") || "";
     const transaction_nsu = params.get("transaction_nsu") || "";
     const slug = params.get("slug") || "";
-    setReceipt(params.get("receipt_url"));
+    const receipt_url = params.get("receipt_url");
+    setReceipt(receipt_url);
 
     async function confirm() {
       if (!order_nsu || !transaction_nsu || !slug) {
@@ -27,7 +28,7 @@ function ObrigadoPage() {
       }
       try {
         const { confirmInfinitePayReturn } = await import("@/lib/infinitepay.functions");
-        const result = await confirmInfinitePayReturn({ data: { order_nsu, transaction_nsu, slug } });
+        const result = await confirmInfinitePayReturn({ data: { order_nsu, transaction_nsu, slug, receipt_url } });
         if (!alive) return;
         if (result.ok) {
           setOrderId(result.order_id || null);
