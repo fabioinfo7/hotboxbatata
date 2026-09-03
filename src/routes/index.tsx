@@ -1,5 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { toast } from "sonner";
 import {
   ShoppingCart,
@@ -33,6 +34,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { CustomerLoyaltyClub } from "@/components/customer-loyalty-club";
+import { quoteLoyaltyReward } from "@/lib/loyalty.functions";
 
 export const Route = createFileRoute("/")({
   component: CustomerHome,
@@ -98,6 +101,7 @@ function CustomerHome() {
   const [cardEnabled, setCardEnabled] = useState(true);
   const [digitalMenuEnabled, setDigitalMenuEnabled] = useState(true);
   const [configLoaded, setConfigLoaded] = useState(false);
+  const [customerSession, setCustomerSession] = useState<Session | null>(null);
   const [areaStatus, setAreaStatus] = useState<AreaStatus>("idle");
   const [accessCep, setAccessCep] = useState("");
   const [manualNeighborhood, setManualNeighborhood] = useState("");
@@ -107,7 +111,7 @@ function CustomerHome() {
 
 
   const [couponInput, setCouponInput] = useState("");
-  const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; discount: number } | null>(null);
+  const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; discount: number; loyalty?: boolean } | null>(null);
   const [couponError, setCouponError] = useState("");
   const [checkingCoupon, setCheckingCoupon] = useState(false);
 
@@ -132,6 +136,12 @@ function CustomerHome() {
     cep: "",
     payment: "infinitepay" as CheckoutPayment,
   });
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setCustomerSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setCustomerSession(session));
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     supabase
@@ -168,6 +178,11 @@ function CustomerHome() {
   useEffect(() => {
     if (form.payment !== "infinitepay") setForm((current) => ({ ...current, payment: "infinitepay" }));
   }, [form.payment]);
+
+  useEffect(() => {
+    const n = String(customerSession?.user?.user_metadata?.full_name || customerSession?.user?.user_metadata?.name || "").trim();
+    if (n) setForm((current) => current.name ? current : { ...current, name: n });
+  }, [customerSession?.user?.id]);
 
 
 
@@ -330,17 +345,40 @@ function CustomerHome() {
     });
   const totalQty = cart.reduce((s, i) => s + i.qty, 0);
 
-  async function applyCoupon() {
-    const code = couponInput.trim().toUpperCase();
+  async function applyCoupon(explicitCode?: string) {
+    const code = String(explicitCode || couponInput).trim().toUpperCase();
     if (!code) return;
     const couponPhone = onlyDigits(form.phone);
     if (couponPhone.length < 10) {
-      setCouponError("Informe seu WhatsApp para validar o cupom.");
+      setCouponInput(code);
+      setCouponError("Informe seu WhatsApp para validar o cupom. O número já ficará preenchido no checkout.");
+      setView("cart");
       return;
     }
     setCheckingCoupon(true);
     setCouponError("");
     try {
+      if (code.startsWith("HB-FIEL-")) {
+        const quoted = await quoteLoyaltyReward({
+          data: {
+            accessToken: customerSession?.access_token || null,
+            code,
+            deliveryMode: form.deliveryMode,
+            items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty })),
+          },
+        });
+        if (!quoted.ok) {
+          setAppliedCoupon(null);
+          setCouponInput(code);
+          setCouponError((quoted as any).reason || "Cupom de fidelidade indisponível.");
+          return;
+        }
+        setCouponInput(code);
+        setAppliedCoupon({ code: quoted.code, discount: Number(quoted.discount || 0), loyalty: true });
+        toast.success(`🔥 Recompensa aplicada: ${quoted.productName} grátis!`);
+        return;
+      }
+
       const { data, error } = await (supabase as any).rpc("validate_coupon_public", {
         p_code: code,
         p_subtotal: subtotal,
@@ -353,7 +391,8 @@ function CustomerHome() {
         setCouponError(data?.reason || "Cupom inválido");
         return;
       }
-      setAppliedCoupon({ code: data.code, discount: Number(data.discount || 0) });
+      setCouponInput(code);
+      setAppliedCoupon({ code: data.code, discount: Number(data.discount || 0), loyalty: false });
       toast.success("Cupom aplicado!");
     } catch (err) {
       console.error(err);
@@ -375,6 +414,25 @@ function CustomerHome() {
     const couponPhone = onlyDigits(form.phone);
     if (couponPhone.length < 10) return;
     const timer = window.setTimeout(async () => {
+      if (appliedCoupon.loyalty || appliedCoupon.code.startsWith("HB-FIEL-")) {
+        const quoted = await quoteLoyaltyReward({
+          data: {
+            accessToken: customerSession?.access_token || null,
+            code: appliedCoupon.code,
+            deliveryMode: form.deliveryMode,
+            items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty })),
+          },
+        });
+        if (!quoted.ok) {
+          setAppliedCoupon(null);
+          setCouponError((quoted as any).reason || "A recompensa deixou de ser válida para este carrinho.");
+          return;
+        }
+        const nextDiscount = Number(quoted.discount || 0);
+        setAppliedCoupon((current) => current ? { ...current, discount: nextDiscount, loyalty: true } : current);
+        setCouponError("");
+        return;
+      }
       const { data, error } = await (supabase as any).rpc("validate_coupon_public", {
         p_code: appliedCoupon.code,
         p_subtotal: subtotal,
@@ -387,11 +445,11 @@ function CustomerHome() {
         return;
       }
       const nextDiscount = Number(data.discount || 0);
-      setAppliedCoupon((current) => current && current.code === data.code && current.discount === nextDiscount ? current : { code: data.code, discount: nextDiscount });
+      setAppliedCoupon((current) => current ? { ...current, discount: nextDiscount } : current);
       setCouponError("");
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [subtotal, form.phone, cart, appliedCoupon?.code]);
+  }, [subtotal, form.phone, form.deliveryMode, cart, appliedCoupon?.code, customerSession?.access_token]);
 
   function openDetail(p: Product) {
     setSelectedProduct(p);
@@ -446,6 +504,7 @@ function CustomerHome() {
           address_cep: isDelivery ? form.cep || null : null,
           payment_kind: form.payment,
           coupon_code: appliedCoupon?.code || null,
+          access_token: customerSession?.access_token || null,
           items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty, notes: i.notes || null })),
         },
       });
@@ -456,7 +515,11 @@ function CustomerHome() {
       const payment = await createInfinitePayCheckout({
         data: { checkoutId: created.checkout.id, origin: window.location.origin },
       });
-      if (!("url" in payment) || !payment.url) throw new Error(("error" in payment && payment.error) || "Não foi possível abrir o pagamento");
+      if (!("url" in payment) || !payment.url) {
+        const { cancelSiteCheckout } = await import("@/lib/site-checkout.functions");
+        await cancelSiteCheckout({ data: { checkoutId: created.checkout.id, access_token: customerSession?.access_token || null } });
+        throw new Error(("error" in payment && payment.error) || "Não foi possível abrir o pagamento");
+      }
 
       setCart([]);
       removeCoupon();
@@ -800,7 +863,7 @@ function CustomerHome() {
                       }}
                       onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
                     />
-                    <Button variant="outline" className="rounded-full" onClick={applyCoupon} disabled={checkingCoupon}>
+                    <Button variant="outline" className="rounded-full" onClick={() => void applyCoupon()} disabled={checkingCoupon}>
                       {checkingCoupon ? <Loader2 className="size-4 animate-spin" /> : "Aplicar"}
                     </Button>
                   </div>
@@ -1136,6 +1199,23 @@ function CustomerHome() {
       </header>
 
       <main className="mx-auto max-w-2xl px-4 py-5">
+        {!query && activeCategory === "Tudo" && (
+          <div className="mb-5">
+            <CustomerLoyaltyClub
+              session={customerSession}
+              onSessionChange={setCustomerSession}
+              onUseReward={(code) => {
+                setCouponInput(code);
+                if (!cart.length) {
+                  toast.info("Adicione sua batata ao carrinho e depois use o cupom no carrinho.");
+                  return;
+                }
+                setView("cart");
+                window.setTimeout(() => void applyCoupon(code), 0);
+              }}
+            />
+          </div>
+        )}
         {!products.length ? (
           <div className="rounded-xl border border-dashed py-16 text-center">
             <p className="text-muted-foreground">Cardápio vazio. Volte em breve!</p>
@@ -1249,7 +1329,7 @@ function CustomerHome() {
           </Link>
         </div>
       </footer>
-//
+
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-card/95 backdrop-blur">
         <div className="mx-auto flex max-w-2xl items-stretch gap-2 px-3 py-2">
           <Link
