@@ -23,7 +23,7 @@ export const Route = createFileRoute("/api/public/webhooks/infinitepay")({
           .eq("id", String(payload.order_nsu))
           .maybeSingle();
         if (!checkout) return Response.json({ success: false, message: "Pedido não encontrado" }, { status: 400 });
-        if (checkout.order_id) return Response.json({ success: true, message: null });
+        const alreadyCreated = Boolean(checkout.order_id);
 
         const verify = await fetch("https://api.checkout.infinitepay.io/payment_check", {
           method: "POST",
@@ -50,9 +50,20 @@ export const Route = createFileRoute("/api/public/webhooks/infinitepay")({
             infinitepay_transaction_nsu: String(payload.transaction_nsu),
             infinitepay_invoice_slug: String(payload.invoice_slug),
             infinitepay_receipt_url: payload.receipt_url ? String(payload.receipt_url) : null,
+            infinitepay_amount_cents: Number(checked.amount ?? payload.amount ?? expected),
+            infinitepay_paid_amount_cents: Number(checked.paid_amount ?? payload.paid_amount ?? checked.amount ?? payload.amount ?? expected),
+            infinitepay_installments: Math.max(1, Number(checked.installments ?? payload.installments ?? 1)),
+            infinitepay_capture_method: captureMethod || null,
+            infinitepay_verified_at: new Date().toISOString(),
+            infinitepay_webhook_payload: payload,
+            infinitepay_verification_payload: checked,
             updated_at: new Date().toISOString(),
           })
           .eq("id", checkout.id);
+
+        if (alreadyCreated) {
+          return Response.json({ success: true, message: null });
+        }
 
         const { data: finalized, error } = await (supabaseAdmin as any).rpc("finalize_site_checkout_paid", {
           p_checkout_id: checkout.id,
