@@ -39,6 +39,7 @@ import {
   Ticket,
   ThumbsUp,
   WalletCards,
+  Trophy,
 } from "lucide-react";
 import { FreightApprovalPopup } from "@/components/freight-approval-popup";
 import { AutoPrintReceipt } from "@/components/auto-print-receipt";
@@ -281,6 +282,7 @@ function AdminLayout() {
         { to: "/loja/pedidos", label: "Histórico", icon: History },
         { to: "/loja/financeiro", label: "Financeiro", icon: TrendingUp },
         { to: "/loja/financeiro-cardapio", label: "Financeiro Cardápio", icon: WalletCards },
+        { to: "/loja/fidelidade", label: "Clube HotBox", icon: Trophy },
         { to: "/loja/receber", label: "A Receber", icon: HandCoins },
         { to: "/loja/leads", label: "Leads", icon: Users },
         { to: "/loja/avaliacoes", label: "Avaliações", icon: ThumbsUp },
