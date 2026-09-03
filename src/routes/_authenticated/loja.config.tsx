@@ -753,7 +753,7 @@ function ConfigPage() {
 
       <Card className="space-y-3 p-5" style={tabStyle("pagamentos")}>
         <h2 className="font-semibold">Pix da loja</h2>
-        <p className="text-xs text-muted-foreground">Esta chave continua disponível para os fluxos atuais do WhatsApp/manual. O Pix automático do cardápio digital usa o QR Code gerado pela Stripe, porque somente assim a Stripe consegue confirmar o pagamento por webhook.</p>
+        <p className="text-xs text-muted-foreground">Esta chave continua disponível para os fluxos atuais do WhatsApp/manual. No cardápio digital, Pix e cartão são processados pela InfinitePay e confirmados automaticamente antes de o pedido entrar na operação.</p>
         <div>
           <Label>Modo</Label>
           <Select value={c.pix_mode || "static"} onValueChange={(v) => setC({ ...c, pix_mode: v })}>
@@ -783,32 +783,18 @@ function ConfigPage() {
       <Card className="space-y-4 p-5" style={tabStyle("pagamentos")}>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold">Stripe — cartão e Pix no cardápio digital</h2>
-            <p className="mt-1 text-xs text-muted-foreground">No cardápio digital, o pedido só é criado após o webhook da Stripe confirmar o pagamento. O fluxo do WhatsApp e dos pedidos manuais não é alterado.</p>
+            <h2 className="font-semibold">InfinitePay — Pix e cartão no cardápio digital</h2>
+            <p className="mt-1 text-xs text-muted-foreground">O cliente paga no checkout seguro da InfinitePay. O pedido só é criado depois da confirmação real do pagamento.</p>
           </div>
-          <Switch checked={c.stripe_enabled === true} onCheckedChange={(v) => setC({ ...c, stripe_enabled: v })} />
+          <Switch checked={c.infinitepay_enabled === true} onCheckedChange={(v) => setC({ ...c, infinitepay_enabled: v })} />
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div>
-            <Label>Publishable key</Label>
-            <Input value={c.stripe_publishable_key || ""} onChange={(e) => setC({ ...c, stripe_publishable_key: e.target.value })} placeholder="pk_live_..." />
-          </div>
-          <div>
-            <Label>Secret key</Label>
-            <Input type="password" value={c.stripe_secret_key || ""} onChange={(e) => setC({ ...c, stripe_secret_key: e.target.value })} placeholder="sk_live_..." />
-          </div>
-          <div className="sm:col-span-2">
-            <Label>Webhook signing secret</Label>
-            <Input type="password" value={c.stripe_webhook_secret || ""} onChange={(e) => setC({ ...c, stripe_webhook_secret: e.target.value })} placeholder="whsec_..." />
-            <p className="mt-1 text-[11px] text-muted-foreground">No Stripe, cadastre o endpoint: <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/stripe` : "/api/public/webhooks/stripe"}</code></p>
-          </div>
-          <div className="sm:col-span-2 flex items-center justify-between gap-4 rounded-xl border p-3">
-            <div>
-              <Label>Pix via Stripe</Label>
-              <p className="mt-1 text-[11px] text-muted-foreground">Ative somente depois de habilitar Pix também no Dashboard da Stripe. A Stripe gera o QR Code e confirma o pagamento pelo webhook.</p>
-            </div>
-            <Switch checked={c.stripe_pix_enabled === true} onCheckedChange={(v) => setC({ ...c, stripe_pix_enabled: v })} />
-          </div>
+        <div>
+          <Label>InfiniteTag / Handle</Label>
+          <Input value={c.infinitepay_handle || ""} onChange={(e) => setC({ ...c, infinitepay_handle: e.target.value.replace(/^\$/, "") })} placeholder="Ex.: hotboxdelivery" />
+          <p className="mt-1 text-[11px] text-muted-foreground">Use sua InfiniteTag sem o símbolo $. A integração oficial do Checkout Integrado usa a InfiniteTag para identificar sua conta.</p>
+        </div>
+        <div className="rounded-xl border bg-muted/30 p-3 text-xs leading-relaxed text-muted-foreground">
+          Webhook configurado automaticamente em <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/infinitepay` : "/api/public/webhooks/infinitepay"}</code>. O sistema também consulta a InfinitePay para confirmar valor e status antes de criar o pedido.
         </div>
       </Card>
 
@@ -833,8 +819,8 @@ function ConfigPage() {
           <Label>Formas aceitas no cardápio digital</Label>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             {[
-              ["digital_menu_pix_enabled", "Pix via Stripe"],
-              ["digital_menu_card_enabled", "Cartão crédito/débito via Stripe"],
+              ["digital_menu_pix_enabled", "Pix via InfinitePay"],
+              ["digital_menu_card_enabled", "Cartão de crédito via InfinitePay"],
             ].map(([field, label]) => (
               <label key={field} className="flex items-center justify-between gap-3 rounded-xl border p-3 text-sm font-medium">
                 {label}
@@ -842,7 +828,7 @@ function ConfigPage() {
               </label>
             ))}
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">No cardápio digital, cartão e Pix são confirmados automaticamente pela Stripe. O pedido não aparece na operação antes dessa confirmação.</p>
+          <p className="mt-2 text-xs text-muted-foreground">No cardápio digital, Pix e cartão são processados pela InfinitePay. O pedido não aparece na operação antes da confirmação do pagamento.</p>
         </div>
       </Card>
 
