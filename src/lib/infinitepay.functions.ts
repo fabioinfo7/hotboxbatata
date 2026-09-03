@@ -106,7 +106,7 @@ export const createInfinitePayCheckout = createServerFn({ method: "POST" })
   });
 
 export const confirmInfinitePayReturn = createServerFn({ method: "POST" })
-  .inputValidator((data: { order_nsu: string; transaction_nsu: string; slug: string }) => data)
+  .inputValidator((data: { order_nsu: string; transaction_nsu: string; slug: string; receipt_url?: string | null }) => data)
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const cfg = await loadInfinitePayConfig(supabaseAdmin);
@@ -118,7 +118,7 @@ export const confirmInfinitePayReturn = createServerFn({ method: "POST" })
       .eq("id", data.order_nsu)
       .maybeSingle();
     if (!checkout) return { ok: false, error: "Checkout não encontrado." };
-    if (checkout.order_id) return { ok: true, order_id: checkout.order_id };
+    const alreadyCreatedOrderId = checkout.order_id ? String(checkout.order_id) : null;
 
     const response = await fetch("https://api.checkout.infinitepay.io/payment_check", {
       method: "POST",
@@ -144,9 +144,18 @@ export const confirmInfinitePayReturn = createServerFn({ method: "POST" })
         payment_kind: paymentKind,
         infinitepay_transaction_nsu: data.transaction_nsu,
         infinitepay_invoice_slug: data.slug,
+        infinitepay_receipt_url: data.receipt_url ? String(data.receipt_url) : undefined,
+        infinitepay_amount_cents: Number(checked.amount ?? expected),
+        infinitepay_paid_amount_cents: Number(checked.paid_amount ?? checked.amount ?? expected),
+        infinitepay_installments: Math.max(1, Number(checked.installments ?? 1)),
+        infinitepay_capture_method: capture || null,
+        infinitepay_verified_at: new Date().toISOString(),
+        infinitepay_verification_payload: checked,
         updated_at: new Date().toISOString(),
       })
       .eq("id", checkout.id);
+
+    if (alreadyCreatedOrderId) return { ok: true, order_id: alreadyCreatedOrderId };
 
     const { data: finalized, error } = await (supabaseAdmin as any).rpc("finalize_site_checkout_paid", {
       p_checkout_id: checkout.id,
