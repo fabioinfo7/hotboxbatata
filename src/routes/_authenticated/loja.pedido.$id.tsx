@@ -924,12 +924,12 @@ function OrderDetail() {
             </p>
             {order.payment_confirmed_by && (
               <p className="mt-1 text-xs text-muted-foreground">
-                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : order.payment_confirmed_by === "stripe" ? "Stripe — pagamento confirmado por webhook" : "Admin"}
+                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : order.payment_confirmed_by === "infinitepay" ? "InfinitePay — pagamento confirmado" : "Admin"}
               </p>
             )}
-            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "stripe" && (
+            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "infinitepay" && (
               <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700">
-                <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA STRIPE
+                <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA INFINITEPAY
               </div>
             )}
             {order.payment_receipt_url && (
