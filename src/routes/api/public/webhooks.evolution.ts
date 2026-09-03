@@ -350,33 +350,6 @@ async function replyAndLog(
   text: string,
   opts?: { systemMessage?: boolean },
 ) {
-  // Guarda final contra resposta atrasada/concorrente de pagamento.
-  // Mesmo que uma rodada antiga tenha montado a pergunta "Qual será a forma de
-  // pagamento?", ela NÃO pode ser enviada se outra rodada já persistiu Pix/cartão
-  // no rascunho. Isso elimina o loop observado: cliente responde "Pix" e ainda
-  // recebe a mesma pergunta novamente antes da oferta de bebida.
-  const normalizedOutgoing = normalizeStreet(String(text ?? ""));
-  const looksLikePaymentQuestion =
-    /(?:qual|informe|informar|diga|dizer).{0,45}(?:forma|metodo).{0,25}pagamento|qual sera a forma de pagamento/.test(normalizedOutgoing);
-
-  if (looksLikePaymentQuestion) {
-    try {
-      const { data: freshDraft } = await supabaseAdmin
-        .from("order_drafts")
-        .select("payment_method")
-        .eq("conversation_id", conversationId)
-        .maybeSingle();
-      if (freshDraft?.payment_method === "pix" || freshDraft?.payment_method === "card") {
-        console.log("[PAYMENT_GUARD] pergunta de pagamento suprimida: método já persistido", freshDraft.payment_method);
-        return;
-      }
-    } catch (err) {
-      // A proteção não pode derrubar o atendimento se houver falha temporária
-      // na consulta. O fluxo normal continua.
-      console.warn("[PAYMENT_GUARD] falha ao conferir pagamento já persistido:", err);
-    }
-  }
-
   const externalId = await sendWhatsappReply(phone, text);
   // Mensagens automáticas do sistema (comprovante do pedido, chave Pix, fallback)
   // são marcadas com media_type "system": aparecem normal no chat do painel, mas
@@ -1335,6 +1308,162 @@ async function buildFinalConfirmationSummary(
   return { text, subtotal, deliveryFee, total, unmatched };
 }
 
+
+
+// ============================================================
+// SUPORTE A PEDIDOS DO CARDÁPIO DIGITAL / SITE
+// ============================================================
+// Esse fluxo é determinístico e roda ANTES do portão de bairro. Um cliente que
+// já comprou pelo site não está iniciando um novo pedido pelo WhatsApp; portanto
+// não faz sentido pedir bairro. Pedimos apenas nome ou número do pedido, buscamos
+// o pedido real no banco e informamos o status sem deixar a IA inventar nada.
+function digitalOrderSupportWasRequested(history: Array<{ role: string; content: string }>): boolean {
+  const previousAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+  const p = normalizeStreet(previousAssistant);
+  return /(?:nome).{0,45}(?:numero|número).{0,25}pedido|(?:numero|número).{0,45}pedido.{0,45}nome/.test(p);
+}
+
+function isDigitalOrderSupportIntent(text: string, history: Array<{ role: string; content: string }>): boolean {
+  if (digitalOrderSupportWasRequested(history)) return true;
+  const t = normalizeStreet(text);
+  const mentionsDigitalChannel = /\b(?:cardapio digital|cardapio online|site|sistema da hotbox|sistema hotbox|sistema da loja|pedido online)\b/.test(t);
+  const saysOrderAlreadyExists = /\b(?:fiz|realizei|efetuei|finalizei|conclui|conclui|acabei de fazer|ja fiz|já fiz|paguei|tenho)\b.{0,70}\bpedido\b|\bpedido\b.{0,70}\b(?:fiz|realizei|efetuei|finalizei|conclui|paguei)\b/.test(t);
+  const asksStatus = /\b(?:status|andamento|acompanhar|acompanho|onde esta|onde está|como esta|como está|meu pedido|pedido chegou|pedido foi confirmado)\b/.test(t);
+  return mentionsDigitalChannel && (saysOrderAlreadyExists || asksStatus);
+}
+
+function extractDigitalOrderReference(
+  text: string,
+  history: Array<{ role: string; content: string }>,
+): { orderNumber?: number; customerName?: string } {
+  const raw = String(text ?? "").trim();
+  const normalized = normalizeStreet(raw);
+  const waitingReference = digitalOrderSupportWasRequested(history);
+
+  const explicitNumber = normalized.match(/(?:pedido|numero do pedido|número do pedido|n[ºo]\.?)[\s:#-]*(\d{1,9})\b/);
+  if (explicitNumber) return { orderNumber: Number(explicitNumber[1]) };
+  const hashNumber = raw.match(/#\s*(\d{1,9})\b/);
+  if (hashNumber) return { orderNumber: Number(hashNumber[1]) };
+  if (waitingReference && /^\s*\d{1,9}\s*$/.test(raw)) return { orderNumber: Number(raw.trim()) };
+
+  const explicitName = raw.match(/(?:meu nome (?:é|e)|nome(?: do cliente)?\s*[:=-]?)\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' -]{1,70})/i);
+  if (explicitName?.[1]) {
+    const name = explicitName[1].replace(/\s+(?:pedido|numero|número|do pedido).*$/i, "").trim();
+    if (name.length >= 2) return { customerName: name };
+  }
+
+  if (waitingReference && !/\d/.test(raw)) {
+    const name = raw
+      .replace(/^(?:meu nome (?:é|e)|sou|é no nome de|e no nome de)\s+/i, "")
+      .replace(/[.!?]+$/g, "")
+      .trim();
+    if (/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' -]{1,70}$/.test(name)) return { customerName: name };
+  }
+
+  return {};
+}
+
+function publicOrderStatusLabel(status: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    pending_review: "aguardando confirmação da loja",
+    payment_pending: "aguardando confirmação do pagamento",
+    pending: "confirmado e na fila de preparo",
+    preparing: "em preparação",
+    ready: "pronto",
+    ready_pickup: "pronto e aguardando retirada/entregador",
+    out_for_delivery: "saiu para entrega",
+    delivered: "entregue",
+    failed: "com uma ocorrência que precisa ser verificada pela loja",
+    cancelled: "cancelado",
+    canceled: "cancelado",
+  };
+  const key = String(status ?? "").trim();
+  return labels[key] ?? (key || "em processamento");
+}
+
+async function findOrderForDigitalSupport(
+  supabaseAdmin: any,
+  ref: { orderNumber?: number; customerName?: string },
+): Promise<{ order: any | null; ambiguous?: boolean }> {
+  const selection = "id,order_number,customer_name,customer_phone,status,payment_status,source,total,created_at";
+  if (ref.orderNumber != null && Number.isFinite(ref.orderNumber)) {
+    const { data } = await supabaseAdmin
+      .from("orders")
+      .select(selection)
+      .eq("order_number", ref.orderNumber)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return { order: data ?? null };
+  }
+
+  const name = String(ref.customerName ?? "").trim();
+  if (!name) return { order: null };
+  // Busca exata, sem diferenciar maiúsculas/minúsculas. Limita a poucos registros
+  // recentes para não expor pedido de homônimo por engano.
+  const escaped = name.replace(/[%_]/g, "");
+  const { data } = await supabaseAdmin
+    .from("orders")
+    .select(selection)
+    .ilike("customer_name", escaped)
+    .order("created_at", { ascending: false })
+    .limit(3);
+  const rows = data ?? [];
+  if (rows.length === 1) return { order: rows[0] };
+  if (rows.length > 1) return { order: null, ambiguous: true };
+  return { order: null };
+}
+
+async function handleDigitalOrderSupportIfNeeded(
+  supabaseAdmin: any,
+  conversation: any,
+  phone: string,
+  text: string,
+  history: Array<{ role: string; content: string }>,
+): Promise<Response | null> {
+  if (!isDigitalOrderSupportIntent(text, history)) return null;
+
+  const ref = extractDigitalOrderReference(text, history);
+  if (ref.orderNumber == null && !ref.customerName) {
+    await replyAndLog(
+      supabaseAdmin,
+      conversation.id,
+      phone,
+      "Claro! Para consultar seu pedido, poderia me informar *o nome usado no pedido* ou *o número do pedido*, por favor?",
+    );
+    return Response.json({ ok: true, action: "digital_order_reference_requested" });
+  }
+
+  const found = await findOrderForDigitalSupport(supabaseAdmin, ref);
+  if (found.ambiguous) {
+    await replyAndLog(
+      supabaseAdmin,
+      conversation.id,
+      phone,
+      "Encontrei mais de um pedido com esse nome. Para eu consultar o pedido correto, poderia me informar *o número do pedido*, por favor?",
+    );
+    return Response.json({ ok: true, action: "digital_order_number_required_for_ambiguity" });
+  }
+
+  if (!found.order) {
+    await replyAndLog(
+      supabaseAdmin,
+      conversation.id,
+      phone,
+      "Não localizei um pedido com essa informação. Poderia conferir e me enviar *o nome usado no pedido* ou *o número do pedido*, por favor?",
+    );
+    return Response.json({ ok: true, action: "digital_order_not_found" });
+  }
+
+  const order = found.order;
+  const numberText = order.order_number != null ? ` *#${order.order_number}*` : "";
+  const statusText = publicOrderStatusLabel(order.status);
+  const message =
+    `Localizei o pedido${numberText}. O status atual é: *${statusText}*.` +
+    `\n\nTodas as próximas atualizações do seu pedido você pode acompanhar por aqui, pelo WhatsApp. Obrigado pelo contato e pela preferência!`;
+  await replyAndLog(supabaseAdmin, conversation.id, phone, message, { systemMessage: true });
+  return Response.json({ ok: true, action: "digital_order_status_informed", order_id: order.id });
+}
 
 async function loadLastOrderText(supabaseAdmin: any, phone: string): Promise<string | null> {
   const { data: order } = await supabaseAdmin
@@ -2494,24 +2623,6 @@ function isExplicitNegative(text: string): boolean {
 function isBeverageDecline(text: string): boolean {
   const t = normalizeStreet(text).replace(/[.!?]/g, "").trim();
   return /^(nao|não|nao obrigado|não obrigado|nao obrigada|não obrigada|sem bebida|sem refrigerante|so isso|só isso|pode fechar|pode seguir)$/.test(t);
-}
-
-function isBeverageAccept(text: string): boolean {
-  const t = normalizeStreet(text).replace(/[.!?]/g, " ").replace(/\s+/g, " ").trim();
-  if (!t || isBeverageDecline(t)) return false;
-  return /^(sim|s|quero|pode|pode sim|sim por favor|quero sim)(\b|$)/.test(t) ||
-    /\b(coloca|coloque|adiciona|adicione|manda|mande|quero|pode colocar|pode adicionar|inclui|inclua)\b/.test(t) ||
-    /^\d+\s*(por favor)?$/.test(t);
-}
-
-function beverageQuantityFromText(text: string): number {
-  const t = normalizeStreet(text);
-  const numeric = t.match(/\b(\d{1,2})\b/);
-  if (numeric) return Math.max(1, Math.min(20, Number(numeric[1])));
-  if (/\b(duas|dois)\b/.test(t)) return 2;
-  if (/\b(tres|três)\b/.test(t)) return 3;
-  if (/\b(quatro)\b/.test(t)) return 4;
-  return 1;
 }
 
 function isBeverageOfferMessage(text: string): boolean {
@@ -4113,95 +4224,13 @@ async function runConversationalTurn(opts: {
     }
   }
 
-  // Resposta à oferta de bebida precisa ser tratada deterministicamente.
-  // As ofertas são gravadas como systemMessage e podem não aparecer no histórico
-  // filtrado da IA; por isso consultamos também as mensagens reais persistidas.
-  const previousAssistantText = lastUserIndex > 0
-    ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
-    : "";
-  let beverageOfferContext = isBeverageOfferMessage(previousAssistantText);
-  if (!beverageOfferContext && !opts.forceNoTools) {
-    const { data: recentDrinkContext } = await opts.supabaseAdmin
-      .from("whatsapp_messages")
-      .select("direction,body,created_at")
-      .eq("conversation_id", opts.conversation.id)
-      .not("body", "is", null)
-      .order("created_at", { ascending: false })
-      .limit(8);
-    const rows = recentDrinkContext ?? [];
-    const latestInboundIdx = rows.findIndex((m: any) => m.direction === "in");
-    const olderRows = latestInboundIdx >= 0 ? rows.slice(latestInboundIdx + 1) : rows;
-    beverageOfferContext = olderRows.some((m: any) => m.direction === "out" && isBeverageOfferMessage(String(m.body ?? "")));
-  }
-
-  // Se o cliente aceitou a bebida (ex.: "sim", "coloque 1", "pode adicionar"),
-  // adiciona a bebida ANTES de gerar o resumo. Assim o item e o total nunca
-  // ficam de fora do fechamento. Quando há uma única bebida ativa, "sim" vale 1.
-  if (!opts.forceNoTools && beverageOfferContext && isBeverageAccept(lastUserText)) {
-    const { data: beverageProducts } = await opts.supabaseAdmin
-      .from("products")
-      .select("id,name,category,sale_price,promotion_active,promotion_price,promotion_type,promotion_start_at,promotion_end_at,promotion_days_of_week,promotion_time_start,promotion_time_end,promotion_label")
-      .eq("active", true)
-      .order("name");
-    const drinks = (beverageProducts ?? []).filter((p: any) => {
-      const hay = normalizeStreet(`${p.category ?? ""} ${p.name ?? ""}`);
-      return /\b(bebida|bebidas|refrigerante|refrigerantes|guarana|coca|agua|suco)\b/.test(hay);
-    });
-
-    if (drinks.length) {
-      const normalizedUser = normalizeStreet(lastUserText);
-      let chosen = drinks.find((p: any) => normalizedUser.includes(normalizeStreet(String(p.name ?? ""))));
-      if (!chosen && drinks.length === 1) chosen = drinks[0];
-      if (!chosen) {
-        const options = drinks.slice(0, 8).map((p: any) => p.name).join(", ");
-        return {
-          silenced: false,
-          finalText: `Claro! Qual bebida você prefere? Temos: ${options}.`,
-          pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false,
-        };
-      }
-
-      const quantity = beverageQuantityFromText(lastUserText);
-      const currentItems = normalizeDraftItems(opts.draft.items ?? []);
-      const chosenName = String(chosen.name);
-      const existingIndex = currentItems.findIndex((item: any) => normalizeStreet(item.product_name) === normalizeStreet(chosenName));
-      const nextItems = currentItems.map((item: any) => ({ ...item }));
-      if (existingIndex >= 0) nextItems[existingIndex].quantity = Number(nextItems[existingIndex].quantity || 0) + quantity;
-      else nextItems.push({ product_name: chosenName, quantity });
-
-      const drinkUpdate = await executeTool("update_order_draft", { items: nextItems }, {
-        supabaseAdmin: opts.supabaseAdmin,
-        conversation: opts.conversation,
-        draft: opts.draft,
-        flags,
-        finalConfirmationAllowed: false,
-        bairrosAtendidos: opts.bairrosAtendidos,
-        bairrosNaoAtendidos: opts.bairrosNaoAtendidos,
-        ruasNaoAtendidas: opts.ruasNaoAtendidas,
-        currentUserText: lastUserText,
-      });
-      const drinkStatus = String(drinkUpdate.result?.status ?? "");
-      if (flags.silenced || drinkStatus === "final_confirmation_summary_sent") {
-        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
-      }
-      // Se por qualquer motivo a atualização não disparou o resumo automaticamente,
-      // finaliza deterministicamente nesta mesma rodada.
-      const directSummary = await executeTool("finalize_order", {}, {
-        supabaseAdmin: opts.supabaseAdmin, conversation: opts.conversation, draft: opts.draft, flags,
-        finalConfirmationAllowed: false, bairrosAtendidos: opts.bairrosAtendidos,
-        bairrosNaoAtendidos: opts.bairrosNaoAtendidos, ruasNaoAtendidas: opts.ruasNaoAtendidas,
-        currentUserText: lastUserText,
-      });
-      if (flags.silenced || ["final_confirmation_summary_sent", "awaiting_final_confirmation"].includes(String(directSummary.result?.status ?? ""))) {
-        return { silenced: true, finalText: "", pixBlock: null, pixKeyLabel: null, pixKeyMessage: null, sendMenuImage: false };
-      }
-    }
-  }
-
   // Resposta negativa à oferta de bebida: não depende da IA. Se o cliente
   // disser que não quer bebida, o backend gera imediatamente o resumo oficial
   // com TOTAL e pede a única confirmação final.
-  if (!opts.forceNoTools && beverageOfferContext && isBeverageDecline(lastUserText)) {
+  const previousAssistantText = lastUserIndex > 0
+    ? [...opts.history.slice(0, lastUserIndex)].reverse().find((m) => m.role === "assistant")?.content ?? ""
+    : "";
+  if (!opts.forceNoTools && isBeverageOfferMessage(previousAssistantText) && isBeverageDecline(lastUserText)) {
     const directSummary = await executeTool("finalize_order", {}, {
       supabaseAdmin: opts.supabaseAdmin,
       conversation: opts.conversation,
@@ -5192,6 +5221,14 @@ async function handleIncomingMessageUnlocked(
         ? `[ATENDENTE HUMANO DA LOJA] ${m.body ?? ""}`
         : (m.body ?? ""),
     }));
+
+  // ============ SUPORTE A PEDIDO JÁ FEITO PELO SITE / CARDÁPIO DIGITAL ============
+  // Tem prioridade sobre BAIRRO PRIMEIRO: aqui o cliente não está começando uma
+  // compra no WhatsApp, está consultando um pedido que já existe no sistema.
+  const digitalOrderSupportResponse = await handleDigitalOrderSupportIfNeeded(
+    supabaseAdmin, conversation, phone, text, history,
+  );
+  if (digitalOrderSupportResponse) return digitalOrderSupportResponse;
 
   // ============ PRIMEIRO CONTATO: BAIRRO SEMPRE PRIMEIRO ============
   // Regra comercial autoritativa: no PRIMEIRO contato do cliente, não importa
