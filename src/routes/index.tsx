@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { CustomerLoyaltyClub } from "@/components/customer-loyalty-club";
+import { MercadoPagoPayment } from "@/components/mercadopago-payment";
 import { quoteLoyaltyReward } from "@/lib/loyalty.functions";
 
 export const Route = createFileRoute("/")({
@@ -64,7 +65,7 @@ type Product = {
 type CartItem = { product: Product; qty: number; notes: string };
 type View = "list" | "detail" | "cart" | "checkout";
 type ActiveFilter = "ativos" | "inativos" | "todos";
-type CheckoutPayment = "infinitepay";
+type CheckoutPayment = "infinitepay" | "mercadopago";
 type AreaStatus = "idle" | "checking" | "supported" | "unsupported" | "error";
 
 const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
@@ -136,6 +137,11 @@ function CustomerHome() {
   );
   const [deliveryTime, setDeliveryTime] = useState<number | null>(null);
   const [infinitepayEnabled, setInfinitepayEnabled] = useState(false);
+  const [paymentProvider, setPaymentProvider] = useState<CheckoutPayment>("infinitepay");
+  const [paymentAvailable, setPaymentAvailable] = useState(false);
+  const [mercadoPagoPublicKey, setMercadoPagoPublicKey] = useState("");
+  const [mercadoPagoMaxInstallments, setMercadoPagoMaxInstallments] = useState(1);
+  const [mpCheckout, setMpCheckout] = useState<{ id: string; total: number } | null>(null);
   const [ifoodStoreLink, setIfoodStoreLink] = useState("");
   const [pixEnabled, setPixEnabled] = useState(true);
   const [cardEnabled, setCardEnabled] = useState(true);
@@ -214,32 +220,45 @@ function CustomerHome() {
       .order("category")
       .order("name")
       .then(({ data }) => setProducts((data as Product[]) ?? []));
-    supabase
-      .from("store_config_public")
-      .select(
-        "store_name,default_delivery_fee,estimated_delivery_time_minutes,banner_image_url,banner_tagline,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled,infinitepay_enabled,ifood_store_link",
-      )
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data) {
-          setStoreName(data.store_name ?? "HotBox Delivery");
-          setDeliveryFee(Number(data.default_delivery_fee ?? 0));
-          setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
-          setBannerUrl(data.banner_image_url ?? null);
-          setInfinitepayEnabled((data as any).infinitepay_enabled === true);
-          setIfoodStoreLink(String((data as any).ifood_store_link || ""));
-          setDigitalMenuEnabled((data as any).digital_menu_enabled !== false);
-          setPixEnabled((data as any).digital_menu_pix_enabled !== false);
-          setCardEnabled((data as any).digital_menu_card_enabled !== false);
-          if (data.banner_tagline) setBannerTagline(data.banner_tagline);
-        }
-        setConfigLoaded(true);
-      });
+    Promise.all([
+      supabase
+        .from("store_config_public")
+        .select(
+          "store_name,default_delivery_fee,estimated_delivery_time_minutes,banner_image_url,banner_tagline,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled,infinitepay_enabled,ifood_store_link",
+        )
+        .maybeSingle(),
+      (supabase as any).rpc("get_public_payment_config"),
+    ]).then(([storeResult, paymentResult]: any[]) => {
+      const data = storeResult?.data;
+      if (data) {
+        setStoreName(data.store_name ?? "HotBox Delivery");
+        setDeliveryFee(Number(data.default_delivery_fee ?? 0));
+        setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
+        setBannerUrl(data.banner_image_url ?? null);
+        setInfinitepayEnabled((data as any).infinitepay_enabled === true);
+        setIfoodStoreLink(String((data as any).ifood_store_link || ""));
+        setDigitalMenuEnabled((data as any).digital_menu_enabled !== false);
+        setPixEnabled((data as any).digital_menu_pix_enabled !== false);
+        setCardEnabled((data as any).digital_menu_card_enabled !== false);
+        if (data.banner_tagline) setBannerTagline(data.banner_tagline);
+      }
+      const pay = paymentResult?.data || {};
+      const provider: CheckoutPayment = pay.provider === "mercadopago" ? "mercadopago" : "infinitepay";
+      setPaymentProvider(provider);
+      setPaymentAvailable(pay.payment_available === true);
+      setMercadoPagoPublicKey(String(pay.mercadopago_public_key || ""));
+      setMercadoPagoMaxInstallments(Math.min(12, Math.max(1, Number(pay.mercadopago_max_installments || 1))));
+      setForm((current) => ({ ...current, payment: provider }));
+      setConfigLoaded(true);
+    }).catch((error) => {
+      console.error("[cardapio] falha ao carregar configurações", error);
+      setConfigLoaded(true);
+    });
   }, []);
 
   useEffect(() => {
-    if (form.payment !== "infinitepay") setForm((current) => ({ ...current, payment: "infinitepay" }));
-  }, [form.payment]);
+    if (form.payment !== paymentProvider) setForm((current) => ({ ...current, payment: paymentProvider }));
+  }, [form.payment, paymentProvider]);
 
   useEffect(() => {
     const n = String(customerSession?.user?.user_metadata?.full_name || customerSession?.user?.user_metadata?.name || "").trim();
@@ -564,12 +583,12 @@ function CustomerHome() {
     if (!form.name || !form.phone) return toast.error("Preencha nome e telefone");
     if (isDelivery && (!form.street || !form.number || !form.neighborhood)) return toast.error("Preencha rua, número e bairro");
     if (isDelivery && areaStatus !== "supported") return toast.error("Valide sua área de entrega antes de finalizar");
-    if (!infinitepayEnabled) return toast.error("Pagamento online indisponível no momento");
+    if (!paymentAvailable) return toast.error("Pagamento online indisponível no momento");
 
     setPlacing(true);
     try {
       const { createSiteCheckout } = await import("@/lib/site-checkout.functions");
-      const created = await createSiteCheckout({
+      const created: any = await createSiteCheckout({
         data: {
           customer_name: form.name,
           customer_phone: onlyDigits(form.phone),
@@ -580,14 +599,23 @@ function CustomerHome() {
           address_neighborhood: isDelivery ? form.neighborhood || null : null,
           address_city: isDelivery ? form.city || null : null,
           address_cep: isDelivery ? form.cep || null : null,
-          payment_kind: form.payment,
+          payment_kind: paymentProvider,
           coupon_code: appliedCoupon?.code || null,
           access_token: customerSession?.access_token || null,
           items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty, notes: i.notes || null })),
         },
       });
-      if ("error" in created && created.error) throw new Error(created.error);
-      if (!("checkout" in created) || !created.checkout?.id) throw new Error("Checkout não criado");
+      if (created?.error) throw new Error(created.error);
+      if (!created?.checkout?.id) throw new Error("Checkout não criado");
+
+      const provider: CheckoutPayment = created.checkout.payment_provider === "mercadopago" ? "mercadopago" : "infinitepay";
+      if (provider === "mercadopago") {
+        setPaymentProvider("mercadopago");
+        setForm((current) => ({ ...current, payment: "mercadopago" }));
+        setMpCheckout({ id: String(created.checkout.id), total: Number(created.checkout.total || total) });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
 
       const { createInfinitePayCheckout } = await import("@/lib/infinitepay.functions");
       const payment = await createInfinitePayCheckout({
@@ -605,13 +633,29 @@ function CustomerHome() {
     } catch (err: any) {
       console.error(err);
       const message = String(err?.message || "Não foi possível iniciar o pagamento.");
-      if (/fora da área|fora da area|bairro|entrega/i.test(message)) {
-        redirectOutsideArea();
-      }
+      if (/fora da área|fora da area|bairro|entrega/i.test(message)) redirectOutsideArea();
       toast.error(message);
     } finally {
       setPlacing(false);
     }
+  }
+
+  async function cancelMercadoPagoCheckout() {
+    if (!mpCheckout) return;
+    try {
+      const { cancelSiteCheckout } = await import("@/lib/site-checkout.functions");
+      await cancelSiteCheckout({ data: { checkoutId: mpCheckout.id, access_token: customerSession?.access_token || null } });
+    } catch {}
+    setMpCheckout(null);
+  }
+
+  function finishMercadoPago(orderId?: string | null) {
+    if (orderId) pushMyOrder(orderId);
+    const checkoutId = mpCheckout?.id || "";
+    setCart([]);
+    removeCoupon();
+    setMpCheckout(null);
+    window.location.href = `/obrigado?provider=mercadopago&checkout_id=${encodeURIComponent(checkoutId)}`;
   }
 
   if (!configLoaded) {
@@ -1144,45 +1188,63 @@ function CustomerHome() {
             <div className="mb-3">
               <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Pagamento seguro</h3>
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                Escolha como prefere pagar. Assim que o pagamento for aprovado, seu pedido é confirmado automaticamente e enviado para preparo.
+                Pix e cartão são confirmados automaticamente. Seu pedido só entra na operação depois da confirmação real do pagamento.
               </p>
             </div>
 
-            <div className="rounded-2xl border-2 border-primary bg-primary/5 p-4">
-              <div className="flex items-center gap-3">
-                <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground"><ShieldCheck className="size-5" /></span>
-                <div>
-                  <p className="text-sm font-black">Pix ou cartão</p>
-                  <p className="text-[11px] text-muted-foreground">Pagamento seguro pela InfinitePay</p>
+            {mpCheckout ? (
+              <MercadoPagoPayment
+                checkoutId={mpCheckout.id}
+                amount={mpCheckout.total}
+                publicKey={mercadoPagoPublicKey}
+                maxInstallments={mercadoPagoMaxInstallments}
+                customerEmail={customerSession?.user?.email || null}
+                origin={typeof window !== "undefined" ? window.location.origin : ""}
+                onPaid={finishMercadoPago}
+                onCancel={cancelMercadoPagoCheckout}
+              />
+            ) : (
+              <>
+                <div className="rounded-2xl border-2 border-primary bg-primary/5 p-4">
+                  <div className="flex items-center gap-3">
+                    <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground"><ShieldCheck className="size-5" /></span>
+                    <div>
+                      <p className="text-sm font-black">Pix ou cartão</p>
+                      <p className="text-[11px] text-muted-foreground">{paymentProvider === "mercadopago" ? "Pagamento rápido sem sair da HotBox" : "Pagamento seguro pela InfinitePay"}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
+                    <div className="flex items-center gap-2 rounded-xl bg-white p-2"><QrCode className="size-4" /> Pix com QR Code</div>
+                    <div className="flex items-center gap-2 rounded-xl bg-white p-2"><CreditCard className="size-4" /> Cartão de crédito</div>
+                  </div>
+                  <p className="mt-3 text-xs leading-relaxed text-emerald-900">
+                    {paymentProvider === "mercadopago" ? "Ao continuar, o pagamento abre aqui mesmo. No Pix, o QR Code aparece na HotBox; no cartão, a confirmação do banco só aparece quando necessária." : "Na próxima tela você escolhe Pix ou cartão. Seu pedido só entra em preparo depois da confirmação do pagamento."}
+                  </p>
                 </div>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
-                <div className="flex items-center gap-2 rounded-xl bg-white p-2"><QrCode className="size-4" /> Pix com QR Code</div>
-                <div className="flex items-center gap-2 rounded-xl bg-white p-2"><CreditCard className="size-4" /> Cartão de crédito</div>
-              </div>
-              <p className="mt-3 text-xs leading-relaxed text-emerald-900">Na próxima tela você escolhe Pix ou cartão. Seu pedido só entra em preparo depois da confirmação do pagamento.</p>
-            </div>
-
-            {!infinitepayEnabled && (
-              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-900">
-                Pagamento online temporariamente indisponível. Fale conosco pelo WhatsApp para fazer seu pedido.
-              </div>
+                {!paymentAvailable && (
+                  <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-900">
+                    Pagamento online temporariamente indisponível. Fale conosco pelo WhatsApp para fazer seu pedido.
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
 
-        <div className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 backdrop-blur">
-          <div className="mx-auto max-w-2xl">
-            <Button
-              onClick={placeOrder}
-              disabled={placing}
-              className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
-            >
-              <span>{placing ? "Preparando pagamento..." : "Continuar para pagamento"}</span>
-              <span>{brl(total)}</span>
-            </Button>
+        {!mpCheckout && (
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 backdrop-blur">
+            <div className="mx-auto max-w-2xl">
+              <Button
+                onClick={placeOrder}
+                disabled={placing || !paymentAvailable}
+                className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
+              >
+                <span>{placing ? "Preparando pagamento..." : paymentProvider === "mercadopago" ? "Pagar com Pix ou cartão" : "Continuar para pagamento"}</span>
+                <span>{brl(total)}</span>
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
