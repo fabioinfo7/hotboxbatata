@@ -8,7 +8,7 @@ export const Route = createFileRoute("/api/public/webhooks/infinitepay")({
         const { loadInfinitePayConfig } = await import("@/lib/infinitepay.functions");
         const cfg = await loadInfinitePayConfig(supabaseAdmin);
         const token = new URL(request.url).searchParams.get("token") || "";
-        if (!cfg.enabled || !cfg.handle || !cfg.webhookToken || token !== cfg.webhookToken) {
+        if (!cfg.handle || !cfg.webhookToken || token !== cfg.webhookToken) {
           return Response.json({ success: false, message: "unauthorized" }, { status: 400 });
         }
 
@@ -19,10 +19,11 @@ export const Route = createFileRoute("/api/public/webhooks/infinitepay")({
 
         const { data: checkout } = await (supabaseAdmin as any)
           .from("site_checkout_sessions")
-          .select("id,total,order_id")
+          .select("id,total,order_id,payment_provider")
           .eq("id", String(payload.order_nsu))
           .maybeSingle();
         if (!checkout) return Response.json({ success: false, message: "Pedido não encontrado" }, { status: 400 });
+        if (checkout.payment_provider && checkout.payment_provider !== "infinitepay") return Response.json({ success: true, message: null });
         const alreadyCreated = Boolean(checkout.order_id);
 
         const verify = await fetch("https://api.checkout.infinitepay.io/payment_check", {
