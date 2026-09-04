@@ -1,9 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Heart, Loader2, MessageSquareText, Star } from "lucide-react";
+import hotboxLogo from "@/assets/hotbox-logo.png.asset.json";
 import { getPublicFeedbackFn, submitPublicFeedbackFn } from "@/lib/satisfaction.functions";
-
-const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
 
 export const Route = createFileRoute("/avaliacao/$token")({
   component: FeedbackPage,
@@ -100,7 +99,7 @@ function FeedbackPage() {
     return (
       <main className="grid min-h-screen place-items-center bg-zinc-950 p-5 text-white">
         <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/5 p-7 text-center shadow-2xl">
-          <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="mx-auto mb-6 h-20 w-auto object-contain" />
+          <img src={hotboxLogo.url} alt="HotBox Delivery" className="mx-auto mb-6 h-16 w-auto object-contain" />
           <h1 className="text-2xl font-bold">Link não encontrado</h1>
           <p className="mt-2 text-sm text-zinc-300">Este link de avaliação não é válido.</p>
         </div>
@@ -112,7 +111,7 @@ function FeedbackPage() {
     return (
       <main className="grid min-h-screen place-items-center bg-zinc-950 p-5 text-white">
         <div className="w-full max-w-md rounded-3xl border border-emerald-500/20 bg-white p-8 text-center text-zinc-900 shadow-2xl">
-          <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="mx-auto mb-5 h-20 w-auto object-contain" />
+          <img src={hotboxLogo.url} alt="HotBox Delivery" className="mx-auto mb-5 h-16 w-auto object-contain" />
           <CheckCircle2 className="mx-auto size-14 text-emerald-500" />
           <h1 className="mt-4 text-2xl font-extrabold">Muito obrigado!</h1>
           <p className="mt-3 text-zinc-600">Sua avaliação foi recebida. Ela nos ajuda a melhorar ainda mais e entregar uma experiência cada vez melhor para você.</p>
@@ -128,7 +127,7 @@ function FeedbackPage() {
     <main className="min-h-screen bg-zinc-950 px-4 py-6 text-white sm:py-10">
       <div className="mx-auto w-full max-w-md overflow-hidden rounded-[28px] border border-white/10 bg-white text-zinc-900 shadow-2xl">
         <div className="bg-gradient-to-br from-zinc-950 via-zinc-900 to-red-950 px-6 pb-7 pt-6 text-white">
-          <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-16 w-auto object-contain" />
+          <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-14 w-auto object-contain" />
           <div className="mt-5 inline-flex items-center gap-2 rounded-full bg-amber-400/15 px-3 py-1 text-xs font-semibold text-amber-300 ring-1 ring-amber-400/25">
             <Star className="size-3.5 fill-current" /> Leva cerca de 20 segundos
           </div>

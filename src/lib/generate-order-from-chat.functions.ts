@@ -60,7 +60,7 @@ async function callExtractionAi(supabaseAdmin: any, messages: any[]): Promise<st
 }
 
 type ExtractedItem = { product_name: string; quantity: number; notes?: string | null };
-export type ExtractedOrderFromChat = {
+type Extracted = {
   customer_name: string | null;
   delivery_mode: "delivery" | "pickup" | null;
   address_street: string | null;
@@ -107,49 +107,8 @@ Responda SOMENTE um JSON, sem nenhum texto antes ou depois, no formato exato:
   ];
 }
 
-type GenerateOrderOverrides = Partial<Pick<ExtractedOrderFromChat,
-  | "customer_name"
-  | "delivery_mode"
-  | "address_street"
-  | "address_number"
-  | "address_complement"
-  | "address_neighborhood"
-  | "address_reference"
-  | "payment_method"
-  | "notes"
->> & { items_text?: string | null };
-
-function parseManualItemsText(text: string): ExtractedItem[] {
-  return String(text || "")
-    .split(/\n|;/)
-    .flatMap((line) => line.split(/,(?=\s*\d+\s*[xX])/))
-    .map((raw) => raw.trim())
-    .filter(Boolean)
-    .map((raw) => {
-      const m = raw.match(/^(\d+)\s*[xX]?\s*(.+)$/);
-      if (m) return { product_name: m[2].trim(), quantity: Math.max(1, Number(m[1]) || 1), notes: null };
-      return { product_name: raw, quantity: 1, notes: null };
-    });
-}
-
-function applyOverrides(extracted: ExtractedOrderFromChat, overrides?: GenerateOrderOverrides | null) {
-  if (!overrides) return extracted;
-  const next: ExtractedOrderFromChat = { ...extracted };
-  const scalarKeys: (keyof GenerateOrderOverrides)[] = [
-    "customer_name", "delivery_mode", "address_street", "address_number",
-    "address_complement", "address_neighborhood", "address_reference",
-    "payment_method", "notes",
-  ];
-  for (const key of scalarKeys) {
-    const value = overrides[key];
-    if (typeof value === "string" && value.trim()) (next as any)[key] = value.trim();
-  }
-  if (overrides.items_text?.trim()) next.items = parseManualItemsText(overrides.items_text);
-  return next;
-}
-
 export const generateOrderFromConversation = createServerFn({ method: "POST" })
-  .inputValidator((data: { conversationId: string; overrides?: GenerateOrderOverrides }) => data)
+  .inputValidator((data: { conversationId: string }) => data)
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
@@ -184,7 +143,7 @@ export const generateOrderFromConversation = createServerFn({ method: "POST" })
     const raw = await callExtractionAi(supabaseAdmin, aiMessages);
     if (!raw) return { status: "ai_unavailable" };
 
-    let extracted: ExtractedOrderFromChat;
+    let extracted: Extracted;
     try {
       const cleaned = raw.replace(/```json|```/g, "").trim();
       extracted = JSON.parse(cleaned);
@@ -194,17 +153,6 @@ export const generateOrderFromConversation = createServerFn({ method: "POST" })
 
     if ((extracted.payment_method as any) === "cash") extracted.payment_method = null;
     if (extracted.payment_method !== "card") extracted.card_type = null;
-
-    // O botão manual pode complementar somente o que a conversa não trouxe.
-    // Os overrides nunca alteram o fluxo automático do WhatsApp: são usados
-    // exclusivamente quando o operador clica em “Gerar pedido com IA”.
-    extracted = applyOverrides(extracted, data.overrides);
-
-    // Se há endereço completo, a intenção de entrega está materialmente clara.
-    // Isso evita bloquear o operador só porque a conversa não usou a palavra “entrega”.
-    if (!extracted.delivery_mode && extracted.address_street && extracted.address_number) {
-      extracted.delivery_mode = "delivery";
-    }
 
     const isPickup = extracted.delivery_mode === "pickup";
 
@@ -218,19 +166,10 @@ export const generateOrderFromConversation = createServerFn({ method: "POST" })
     }
     if (!extracted.items?.length) missing.push("itens do pedido");
     if (!extracted.payment_method) missing.push("forma de pagamento");
-    if (missing.length) {
-      const missingKeys: string[] = [];
-      if (!extracted.customer_name) missingKeys.push("customer_name");
-      if (!extracted.delivery_mode) missingKeys.push("delivery_mode");
-      if (!isPickup) {
-        if (!extracted.address_street) missingKeys.push("address_street");
-        if (!extracted.address_number) missingKeys.push("address_number");
-        if (!extracted.address_neighborhood) missingKeys.push("address_neighborhood");
-      }
-      if (!extracted.items?.length) missingKeys.push("items");
-      if (!extracted.payment_method) missingKeys.push("payment_method");
-      return { status: "missing_fields", missing, missingKeys, extracted };
-    }
+    if (extracted.payment_method === "card" && !extracted.card_type) missing.push("se o cartão é crédito ou débito");
+    if (extracted.payment_method === "pix" && !extracted.payment_timing)
+      missing.push("se paga o Pix agora ou na entrega");
+    if (missing.length) return { status: "missing_fields", missing, extracted };
 
     // casamento de produto com o cardápio real — mesma lógica fuzzy do fechamento automático
     const { findProductMatch, findProductSuggestions } = await import("./product-match.server");

@@ -280,29 +280,17 @@ function ConfigPage() {
 
 
   async function save() {
-    const provider = c.digital_payment_provider === "mercadopago" ? "mercadopago" : "infinitepay";
-    if (provider === "mercadopago") {
-      if (c.mercadopago_enabled !== true) return toast.error("Ative o Mercado Pago antes de defini-lo como provedor principal.");
-      if (!String(c.mercadopago_public_key || "").trim()) return toast.error("Informe a Public Key do Mercado Pago.");
-      if (!String(c.mercadopago_access_token || "").trim()) return toast.error("Informe o Access Token do Mercado Pago.");
-    } else {
-      if (c.infinitepay_enabled !== true) return toast.error("Ative a InfinitePay antes de defini-la como provedor principal.");
-      if (!String(c.infinitepay_handle || "").trim()) return toast.error("Informe a InfiniteTag / Handle da InfinitePay.");
-    }
-
     setSaving(true);
     const payload = stripCardOwnedFields({
       ...c,
       id: 1,
-      digital_payment_provider: provider,
-      mercadopago_max_installments: Math.min(12, Math.max(1, Number(c.mercadopago_max_installments || 1))),
       default_delivery_fee: Number(c.default_delivery_fee || 0),
       delivery_cost_per_km: Number(c.delivery_cost_per_km ?? 0.9),
     });
     const { error } = await supabase.from("store_config").upsert(payload);
     setSaving(false);
     if (error) toast.error(error.message);
-    else toast.success(`Configurações salvas. ${provider === "mercadopago" ? "Mercado Pago" : "InfinitePay"} está ativo para novos checkouts.`);
+    else toast.success("Configurações salvas");
   }
 
 
@@ -764,8 +752,7 @@ function ConfigPage() {
       </Card>
 
       <Card className="space-y-3 p-5" style={tabStyle("pagamentos")}>
-        <h2 className="font-semibold">Pix da loja</h2>
-        <p className="text-xs text-muted-foreground">Esta chave continua disponível para os fluxos atuais do WhatsApp/manual. No cardápio digital, Pix e cartão usam o provedor online selecionado abaixo e são confirmados automaticamente antes de o pedido entrar na operação.</p>
+        <h2 className="font-semibold">Pix</h2>
         <div>
           <Label>Modo</Label>
           <Select value={c.pix_mode || "static"} onValueChange={(v) => setC({ ...c, pix_mode: v })}>
@@ -792,91 +779,28 @@ function ConfigPage() {
         </div>
       </Card>
 
-      <Card className="space-y-4 border-2 border-primary/20 p-5" style={tabStyle("pagamentos")}>
-        <div>
-          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-primary">Continuidade da operação</p>
-          <h2 className="mt-1 text-lg font-black">Provedor ativo do cardápio digital</h2>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">O cliente nunca escolhe a empresa de pagamento: ele vê apenas Pix ou cartão. A troca abaixo afeta somente novos checkouts. Pagamentos já iniciados continuam vinculados ao provedor original.</p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {[
-            { key: "mercadopago", name: "Mercado Pago", ready: c.mercadopago_enabled === true && !!String(c.mercadopago_public_key || "").trim() && !!String(c.mercadopago_access_token || "").trim(), detail: "Checkout transparente: Pix e cartão dentro da HotBox." },
-            { key: "infinitepay", name: "InfinitePay", ready: c.infinitepay_enabled === true && !!String(c.infinitepay_handle || "").trim(), detail: "Checkout externo mantido como contingência." },
-          ].map((item) => {
-            const active = (c.digital_payment_provider || "infinitepay") === item.key;
-            return (
-              <button
-                type="button"
-                key={item.key}
-                onClick={() => setC({ ...c, digital_payment_provider: item.key })}
-                className={`rounded-2xl border-2 p-4 text-left transition ${active ? "border-primary bg-primary/5 shadow-sm" : "border-border hover:border-primary/40"}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-black">{item.name}</span>
-                  <span className={`rounded-full px-2 py-1 text-[10px] font-black ${item.ready ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-900"}`}>{item.ready ? "CONFIGURADO" : "CONFIGURAR"}</span>
-                </div>
-                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{item.detail}</p>
-                {active && <p className="mt-3 text-xs font-black text-primary">● Ativo para novos pagamentos</p>}
-              </button>
-            );
-          })}
-        </div>
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-relaxed text-amber-950">
-          Troca manual é intencional. O sistema não muda automaticamente de empresa após timeout ou recusa, evitando duas cobranças para o mesmo checkout.
-        </div>
-      </Card>
-
       <Card className="space-y-4 p-5" style={tabStyle("pagamentos")}>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold">Mercado Pago — checkout transparente</h2>
-            <p className="mt-1 text-xs text-muted-foreground">Pix com QR Code dentro da HotBox e cartão pelo Payment Brick. O Access Token fica restrito ao backend.</p>
+            <h2 className="font-semibold">Stripe — cartão no cardápio digital</h2>
+            <p className="mt-1 text-xs text-muted-foreground">O cliente paga antes do pedido entrar no fluxo operacional. A confirmação do Stripe marca o pedido como pago automaticamente.</p>
           </div>
-          <Switch checked={c.mercadopago_enabled === true} onCheckedChange={(v) => setC({ ...c, mercadopago_enabled: v })} />
+          <Switch checked={c.stripe_enabled === true} onCheckedChange={(v) => setC({ ...c, stripe_enabled: v })} />
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div>
-            <Label>Public Key</Label>
-            <Input value={c.mercadopago_public_key || ""} onChange={(e) => setC({ ...c, mercadopago_public_key: e.target.value.trim() })} placeholder="APP_USR-..." autoComplete="off" />
+            <Label>Publishable key</Label>
+            <Input value={c.stripe_publishable_key || ""} onChange={(e) => setC({ ...c, stripe_publishable_key: e.target.value })} placeholder="pk_live_..." />
           </div>
           <div>
-            <Label>Access Token</Label>
-            <Input type="password" value={c.mercadopago_access_token || ""} onChange={(e) => setC({ ...c, mercadopago_access_token: e.target.value.trim() })} placeholder="APP_USR-..." autoComplete="new-password" />
+            <Label>Secret key</Label>
+            <Input type="password" value={c.stripe_secret_key || ""} onChange={(e) => setC({ ...c, stripe_secret_key: e.target.value })} placeholder="sk_live_..." />
           </div>
-        </div>
-        <div>
-          <Label>Máximo de parcelas no cartão</Label>
-          <Select value={String(c.mercadopago_max_installments || 1)} onValueChange={(v) => setC({ ...c, mercadopago_max_installments: Number(v) })}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="1">Somente 1x — recomendado para delivery</SelectItem>
-              <SelectItem value="2">Até 2x</SelectItem>
-              <SelectItem value="3">Até 3x</SelectItem>
-              <SelectItem value="6">Até 6x</SelectItem>
-              <SelectItem value="12">Até 12x</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="rounded-xl border bg-muted/30 p-3 text-xs leading-relaxed text-muted-foreground">
-          Notificação de pagamento enviada automaticamente para <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/mercadopago` : "/api/public/webhooks/mercadopago"}</code>. Mesmo com o webhook, a HotBox consulta o pagamento diretamente no Mercado Pago e confere valor, moeda e referência antes de criar o pedido.
-        </div>
-      </Card>
-
-      <Card className="space-y-4 p-5" style={tabStyle("pagamentos")}>
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="font-semibold">InfinitePay — contingência do cardápio digital</h2>
-            <p className="mt-1 text-xs text-muted-foreground">O cliente paga no checkout seguro da InfinitePay. O pedido só é criado depois da confirmação real do pagamento.</p>
+          <div className="sm:col-span-2">
+            <Label>Webhook signing secret</Label>
+            <Input type="password" value={c.stripe_webhook_secret || ""} onChange={(e) => setC({ ...c, stripe_webhook_secret: e.target.value })} placeholder="whsec_..." />
+            <p className="mt-1 text-[11px] text-muted-foreground">No Stripe, cadastre o endpoint: <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/stripe` : "/api/public/webhooks/stripe"}</code></p>
           </div>
-          <Switch checked={c.infinitepay_enabled === true} onCheckedChange={(v) => setC({ ...c, infinitepay_enabled: v })} />
-        </div>
-        <div>
-          <Label>InfiniteTag / Handle</Label>
-          <Input value={c.infinitepay_handle || ""} onChange={(e) => setC({ ...c, infinitepay_handle: e.target.value.replace(/^\$/, "") })} placeholder="Ex.: hotboxdelivery" />
-          <p className="mt-1 text-[11px] text-muted-foreground">Use sua InfiniteTag sem o símbolo $. A integração oficial do Checkout Integrado usa a InfiniteTag para identificar sua conta.</p>
-        </div>
-        <div className="rounded-xl border bg-muted/30 p-3 text-xs leading-relaxed text-muted-foreground">
-          Webhook configurado automaticamente em <code>{typeof window !== "undefined" ? `${window.location.origin}/api/public/webhooks/infinitepay` : "/api/public/webhooks/infinitepay"}</code>. O sistema também consulta a InfinitePay para confirmar valor e status antes de criar o pedido.
         </div>
       </Card>
 
@@ -901,8 +825,9 @@ function ConfigPage() {
           <Label>Formas aceitas no cardápio digital</Label>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             {[
-              ["digital_menu_pix_enabled", "Pix"],
-              ["digital_menu_card_enabled", "Cartão de crédito"],
+              ["digital_menu_pix_enabled", "Pix antecipado"],
+              ["digital_menu_card_enabled", "Cartão via Stripe"],
+              ["digital_menu_cash_enabled", "Dinheiro antecipado"],
             ].map(([field, label]) => (
               <label key={field} className="flex items-center justify-between gap-3 rounded-xl border p-3 text-sm font-medium">
                 {label}
@@ -910,7 +835,7 @@ function ConfigPage() {
               </label>
             ))}
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">No cardápio digital, Pix e cartão são processados pelo provedor que estiver ativo acima. O pedido não aparece na operação antes da confirmação real do pagamento.</p>
+          <p className="mt-2 text-xs text-muted-foreground">Nenhuma dessas opções é pagamento na entrega. Pix e dinheiro ficam aguardando confirmação; cartão é confirmado automaticamente pelo Stripe.</p>
         </div>
       </Card>
 

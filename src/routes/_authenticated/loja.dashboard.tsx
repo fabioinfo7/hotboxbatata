@@ -1,7 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { brasiliaDateDaysAgo, brasiliaDayRange, brasiliaMonthStart } from "@/lib/brasilia-date";
 import { brl, ORDER_STATUS_LABEL, orderDisplayRef } from "@/lib/formatters";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -23,8 +22,18 @@ import {
 
 export const Route = createFileRoute("/_authenticated/loja/dashboard")({ component: DashboardPage });
 
-function localISO(offsetDays = 0) { return brasiliaDateDaysAgo(offsetDays); }
-function monthStart() { return brasiliaMonthStart(); }
+function localISO(offsetDays = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() - offsetDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function monthStart() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
 function minutesSince(iso: string) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
 }
@@ -49,7 +58,8 @@ function DashboardPage() {
   const [minQty, setMinQty] = useState("0");
 
   async function load() {
-    const { since, until } = brasiliaDayRange(from, to);
+    const since = `${from}T00:00:00`;
+    const until = `${to}T23:59:59.999`;
     const [opsRes, salesRes, activeRes, delsRes, ingRes, productsRes] = await Promise.all([
       supabase.from("orders").select("id,status,total").gte("created_at", since).lte("created_at", until),
       supabase

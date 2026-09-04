@@ -2,7 +2,6 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
-import { brasiliaDateISO } from "@/lib/brasilia-date";
 import { pushIfoodStatusFn } from "@/lib/ifood-push.functions";
 import { pushNfoodStatusFn } from "@/lib/nfood-push.functions";
 import { sendOrderArrivalNoticeFn } from "@/lib/order-notifications.functions";
@@ -23,7 +22,6 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Printer,
@@ -41,11 +39,6 @@ import {
   Store,
   AlertCircle,
   RotateCcw,
-  History,
-  Save,
-  PlusCircle,
-  Pencil,
-  UserRoundCheck,
 } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/loja/pedido/$id")({
@@ -73,13 +66,6 @@ function OrderDetail() {
   const [sendingArrivalNotice, setSendingArrivalNotice] = useState(false);
   const [reopening, setReopening] = useState(false);
   const [businessHoursText, setBusinessHoursText] = useState<string | null>(null);
-  const [products, setProducts] = useState<any[]>([]);
-  const [addProductId, setAddProductId] = useState("");
-  const [addQuantity, setAddQuantity] = useState(1);
-  const [auditRows, setAuditRows] = useState<any[]>([]);
-  const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editDraft, setEditDraft] = useState<Record<string, any>>({});
-  const [savingDraft, setSavingDraft] = useState(false);
 
   async function reopenOrder() {
     if (!window.confirm("Reabrir esse pedido? Ele volta pra fila como pendente, como se tivesse acabado de chegar."))
@@ -102,12 +88,6 @@ function OrderDetail() {
       setOrder(o);
       const { data: it } = await supabase.from("order_items").select("*").eq("order_id", id).order("created_at");
       setItems(it ?? []);
-      const [{ data: productRows }, { data: auditTrail }] = await Promise.all([
-        supabase.from("products").select("id,name,sale_price,promotion_active,promotion_price,active").eq("active", true).order("name"),
-        supabase.from("audit_log").select("id,action,old_data,new_data,created_at,user_email").eq("table_name", "orders").eq("record_id", id).order("created_at", { ascending: false }).limit(20),
-      ]);
-      setProducts(productRows ?? []);
-      setAuditRows(auditTrail ?? []);
 
       // horário de atendimento configurado — impresso no rodapé da nota
       const { data: hoursCfg } = await (supabase as any)
@@ -289,7 +269,7 @@ function OrderDetail() {
   async function markPayLater() {
     const dueDate = window.prompt(
       "Data prevista para o pagamento (AAAA-MM-DD):",
-      brasiliaDateISO(),
+      new Date().toISOString().slice(0, 10),
     );
     if (!dueDate) return;
     try {
@@ -298,8 +278,7 @@ function OrderDetail() {
         .insert({
           customer_name: order.customer_name,
           description: `Pedido ${orderDisplayRef(order)} — pagar depois`,
-          purchase_date: brasiliaDateISO(),
-          order_id: id,
+          purchase_date: new Date().toISOString().slice(0, 10),
           due_date: dueDate,
           notes: order.notes ?? null,
         })
@@ -440,75 +419,6 @@ function OrderDetail() {
     }
   }
 
-  function openEditDialog() {
-    setEditDraft({
-      customer_name: order.customer_name ?? "",
-      customer_phone: order.customer_phone ?? "",
-      address_street: order.address_street ?? "",
-      address_number: order.address_number ?? "",
-      address_complement: order.address_complement ?? "",
-      address_neighborhood: order.address_neighborhood ?? "",
-      address_city: order.address_city ?? "",
-      address_reference: order.address_reference ?? "",
-      delivery_fee: order.delivery_fee ?? 0,
-      notes: order.notes ?? "",
-    });
-    setEditDialogOpen(true);
-  }
-
-  async function saveEditDraft() {
-    if (savingDraft) return;
-    setSavingDraft(true);
-    try {
-      const patch: any = {
-        customer_name: String(editDraft.customer_name || "").trim(),
-        customer_phone: String(editDraft.customer_phone || "").replace(/\D/g, ""),
-        address_street: String(editDraft.address_street || "").trim() || null,
-        address_number: String(editDraft.address_number || "").trim() || null,
-        address_complement: String(editDraft.address_complement || "").trim() || null,
-        address_neighborhood: String(editDraft.address_neighborhood || "").trim() || null,
-        address_city: String(editDraft.address_city || "").trim() || null,
-        address_reference: String(editDraft.address_reference || "").trim() || null,
-        delivery_fee: Math.max(0, Number(editDraft.delivery_fee) || 0),
-        notes: String(editDraft.notes || "").trim() || null,
-      };
-      if (!patch.customer_name) return toast.error("Informe o nome do cliente.");
-      if (!patch.customer_phone) return toast.error("Informe o telefone do cliente.");
-      const { error } = await supabase.from("orders").update(patch).eq("id", id);
-      if (error) throw error;
-      await syncOrderTotals();
-      setEditDialogOpen(false);
-      toast.success("Alterações salvas com segurança");
-    } catch (err: any) {
-      toast.error(err?.message ?? "Não foi possível salvar as alterações");
-    } finally {
-      setSavingDraft(false);
-    }
-  }
-
-  async function addProductToOrder() {
-    const product = products.find((p) => p.id === addProductId);
-    if (!product) return toast.error("Selecione um produto do cardápio.");
-    const quantity = Math.max(1, Number(addQuantity) || 1);
-    const unitPrice = product.promotion_active && product.promotion_price != null ? Number(product.promotion_price) : Number(product.sale_price || 0);
-    const existing = items.find((i: any) => i.product_id === product.id && Number(i.unit_price) === unitPrice);
-    try {
-      if (existing) {
-        const { error } = await supabase.from("order_items").update({ quantity: Number(existing.quantity) + quantity }).eq("id", existing.id);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("order_items").insert({
-          order_id: id, product_id: product.id, product_name: product.name, quantity, unit_price: unitPrice,
-          list_price: Number(product.sale_price || unitPrice), is_promotion_price: Boolean(product.promotion_active && product.promotion_price != null),
-        });
-        if (error) throw error;
-      }
-      setAddProductId(""); setAddQuantity(1);
-      await syncOrderTotals();
-      toast.success("Produto adicionado e total recalculado");
-    } catch (err: any) { toast.error(err?.message ?? "Não foi possível adicionar o produto"); }
-  }
-
   const isReview = order.status === "pending_review" && order.source !== "ifood" && order.source !== "99food";
 
 
@@ -520,14 +430,9 @@ function OrderDetail() {
             <ArrowLeft className="size-4" /> Voltar
           </Button>
         </Link>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" className="rounded-full font-semibold" onClick={openEditDialog}>
-            <Pencil className="size-4" /> CORRIGIR DADOS
-          </Button>
-          <Button variant="outline" className="rounded-full font-semibold" onClick={() => window.print()}>
-            <Printer className="size-4" /> IMPRIMIR PEDIDO
-          </Button>
-        </div>
+        <Button variant="outline" className="rounded-full font-semibold" onClick={() => window.print()}>
+          <Printer className="size-4" /> IMPRIMIR PEDIDO
+        </Button>
       </div>
 
       {isReview && (
@@ -588,53 +493,20 @@ function OrderDetail() {
               }
             />
           </div>
-          {(order.assigned_operator_email || order.assigned_operator_id) && (
-            <div className="flex items-center gap-1.5 border-b bg-blue-50 px-6 py-2 text-xs font-semibold text-blue-800">
-              <UserRoundCheck className="size-3.5" /> Atendimento por {order.assigned_operator_email || "operador identificado"}
-            </div>
-          )}
 
-          <div className="space-y-2 px-6 pt-5">
-            <div className="flex items-center gap-2.5">
+          <div className="space-y-1 px-6 pt-5">
+            <h2 className="flex items-center gap-2.5 text-[24px] font-extrabold uppercase leading-tight tracking-wide">
               <span className="grid size-9 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
                 <User className="size-5" />
               </span>
-              <div className="min-w-0 flex-1">
-                <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Nome do cliente · editável</p>
-                <Input
-                  className="h-10 text-[18px] font-extrabold uppercase"
-                  defaultValue={order.customer_name ?? ""}
-                  onBlur={async (e) => {
-                    const value = e.target.value.trim();
-                    if (!value || value === order.customer_name) return;
-                    const { error } = await supabase.from("orders").update({ customer_name: value }).eq("id", id);
-                    if (error) return toast.error(error.message);
-                    setOrder((prev: any) => prev ? { ...prev, customer_name: value } : prev);
-                    toast.success("Nome do cliente atualizado");
-                  }}
-                />
-              </div>
-            </div>
-            <div className="flex items-center gap-2.5">
+              {order.customer_name}
+            </h2>
+            <p className="flex items-center gap-2.5 pl-[3px] text-[16px] text-foreground/70">
               <span className="grid size-9 shrink-0 place-items-center">
                 <Phone className="size-4 text-muted-foreground" />
               </span>
-              <div className="min-w-0 flex-1">
-                <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Telefone · editável</p>
-                <Input
-                  className="h-9 text-[15px]"
-                  defaultValue={order.customer_phone ?? ""}
-                  onBlur={async (e) => {
-                    const value = e.target.value.replace(/\D/g, "");
-                    if (!value || value === String(order.customer_phone || "").replace(/\D/g, "")) return;
-                    const { error } = await supabase.from("orders").update({ customer_phone: value }).eq("id", id);
-                    if (error) return toast.error(error.message);
-                    setOrder((prev: any) => prev ? { ...prev, customer_phone: value } : prev);
-                    toast.success("Telefone do cliente atualizado");
-                  }}
-                />
-              </div>
-            </div>
+              {formatPhone(order.customer_phone)}
+            </p>
             {order.customer_phone && (
               <div className="mt-2 flex flex-wrap gap-2 pl-11">
                 <a
@@ -651,16 +523,6 @@ function OrderDetail() {
                 >
                   <Phone className="size-4" /> Ligar
                 </a>
-                {order.delivery_mode !== "pickup" && (order.address_street || order.address_neighborhood) && (
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([order.address_street, order.address_number, order.address_complement, order.address_neighborhood, order.address_city].filter(Boolean).join(", "))}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-sky-700"
-                  >
-                    <MapPin className="size-4" /> Abrir mapa
-                  </a>
-                )}
                 {order.delivery_mode !== "pickup" && ["out_for_delivery", "delivered"].includes(order.status) && (
                   <Button
                     type="button"
@@ -679,17 +541,7 @@ function OrderDetail() {
           </div>
 
           <div className="space-y-2.5 px-6 py-5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-[13px] font-bold uppercase tracking-wide text-muted-foreground">Itens do pedido</h3>
-              <div className="flex min-w-0 flex-1 justify-end gap-2">
-                <select value={addProductId} onChange={(e) => setAddProductId(e.target.value)} className="h-9 min-w-0 max-w-xs rounded-md border bg-background px-2 text-xs">
-                  <option value="">Adicionar produto do cardápio...</option>
-                  {products.map((p: any) => <option key={p.id} value={p.id}>{p.name} — {brl(p.promotion_active && p.promotion_price != null ? p.promotion_price : p.sale_price)}</option>)}
-                </select>
-                <Input type="number" min={1} className="h-9 w-16" value={addQuantity} onChange={(e) => setAddQuantity(Math.max(1, Number(e.target.value) || 1))} />
-                <Button size="sm" className="h-9" onClick={addProductToOrder} disabled={!addProductId}><PlusCircle className="size-4" /> Adicionar</Button>
-              </div>
-            </div>
+            <h3 className="text-[13px] font-bold uppercase tracking-wide text-muted-foreground">Itens do pedido</h3>
             {items.map((i) => (
               <div
                 key={i.id}
@@ -868,22 +720,6 @@ function OrderDetail() {
 
           <Card className="rounded-2xl p-5 shadow-sm">
             <h3 className="mb-3 flex items-center gap-2 text-[15px] font-bold uppercase tracking-wide text-muted-foreground">
-              <History className="size-4" /> Histórico de alterações
-            </h3>
-            <div className="max-h-52 space-y-2 overflow-y-auto pr-1">
-              {auditRows.length ? auditRows.map((row: any) => {
-                const oldStatus = row.old_data?.status; const newStatus = row.new_data?.status;
-                return <div key={row.id} className="rounded-lg border bg-muted/20 p-2 text-xs">
-                  <div className="flex justify-between gap-2"><strong>{row.action}</strong><span className="text-muted-foreground">{formatDateTime(row.created_at)}</span></div>
-                  {oldStatus && newStatus && oldStatus !== newStatus && <p className="mt-1">Status: {ORDER_STATUS_LABEL[oldStatus] || oldStatus} → {ORDER_STATUS_LABEL[newStatus] || newStatus}</p>}
-                  {row.user_email && <p className="mt-1 text-muted-foreground">Por: {row.user_email}</p>}
-                </div>;
-              }) : <p className="text-xs text-muted-foreground">Nenhuma alteração registrada ainda.</p>}
-            </div>
-          </Card>
-
-          <Card className="rounded-2xl p-5 shadow-sm">
-            <h3 className="mb-3 flex items-center gap-2 text-[15px] font-bold uppercase tracking-wide text-muted-foreground">
               <Wallet className="size-4" /> Pagamento
             </h3>
             <div className="text-[15px]">
@@ -926,13 +762,8 @@ function OrderDetail() {
             </p>
             {order.payment_confirmed_by && (
               <p className="mt-1 text-xs text-muted-foreground">
-                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : order.payment_confirmed_by === "stripe" ? "Stripe — pagamento confirmado por webhook" : "Admin"}
+                Confirmado por: {order.payment_confirmed_by === "ia" ? "IA (comprovante WhatsApp)" : "Admin"}
               </p>
-            )}
-            {order.source === "site" && order.payment_status === "paid" && order.payment_confirmed_by === "stripe" && (
-              <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700">
-                <CheckCircle2 className="size-4" /> PAGAMENTO CONFIRMADO VIA STRIPE
-              </div>
             )}
             {order.payment_receipt_url && (
               <a href={order.payment_receipt_url} target="_blank" rel="noopener noreferrer" className="mt-3 block">
@@ -1079,31 +910,6 @@ function OrderDetail() {
       </div>
 
       {/* ============ COMPROVANTE TÉRMICO 80MM ============ */}
-      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader><DialogTitle>Corrigir dados do pedido</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">Revise os dados interpretados pela IA. Nada é salvo até você clicar em <strong>Salvar alterações</strong>.</p>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className="mb-1 block text-xs font-semibold">Nome</label><Input value={editDraft.customer_name ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, customer_name: e.target.value }))} /></div>
-            <div><label className="mb-1 block text-xs font-semibold">Telefone</label><Input value={editDraft.customer_phone ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, customer_phone: e.target.value }))} /></div>
-            {order.delivery_mode !== "pickup" && <>
-              <div><label className="mb-1 block text-xs font-semibold">Rua</label><Input value={editDraft.address_street ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, address_street: e.target.value }))} /></div>
-              <div><label className="mb-1 block text-xs font-semibold">Número</label><Input value={editDraft.address_number ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, address_number: e.target.value }))} /></div>
-              <div><label className="mb-1 block text-xs font-semibold">Bairro</label><Input value={editDraft.address_neighborhood ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, address_neighborhood: e.target.value }))} /></div>
-              <div><label className="mb-1 block text-xs font-semibold">Cidade</label><Input value={editDraft.address_city ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, address_city: e.target.value }))} /></div>
-              <div><label className="mb-1 block text-xs font-semibold">Complemento</label><Input value={editDraft.address_complement ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, address_complement: e.target.value }))} /></div>
-              <div><label className="mb-1 block text-xs font-semibold">Referência</label><Input value={editDraft.address_reference ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, address_reference: e.target.value }))} /></div>
-            </>}
-            <div><label className="mb-1 block text-xs font-semibold">Taxa de entrega</label><Input type="number" step="0.01" min={0} value={editDraft.delivery_fee ?? 0} onChange={(e) => setEditDraft((d) => ({ ...d, delivery_fee: e.target.value }))} /></div>
-            <div className="sm:col-span-2"><label className="mb-1 block text-xs font-semibold">Observações</label><Textarea rows={3} value={editDraft.notes ?? ""} onChange={(e) => setEditDraft((d) => ({ ...d, notes: e.target.value }))} /></div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditDialogOpen(false)} disabled={savingDraft}>Cancelar</Button>
-            <Button onClick={saveEditDraft} disabled={savingDraft}><Save className="size-4" /> {savingDraft ? "Salvando..." : "Salvar alterações"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <PrintReceipt order={order} items={items} businessHoursText={businessHoursText} />
     </div>
   );

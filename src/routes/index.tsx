@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
+import QRCode from "qrcode";
 import { toast } from "sonner";
 import {
   ShoppingCart,
@@ -10,9 +10,11 @@ import {
   MapPin,
   CreditCard,
   QrCode,
+  Banknote,
   ShieldCheck,
   Star,
   ChevronRight,
+  Copy,
   Flame,
   ClipboardList,
   Search,
@@ -22,21 +24,15 @@ import {
   Clock,
   Ticket,
   X,
-  CheckCircle2,
-  AlertTriangle,
-  Loader2,
-  MessageCircle,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { brl, formatPhone, onlyDigits } from "@/lib/formatters";
 import { getEffectivePrice } from "@/lib/promotions";
+import hotboxLogo from "@/assets/hotbox-logo.png.asset.json";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { CustomerLoyaltyClub } from "@/components/customer-loyalty-club";
-import { MercadoPagoPayment } from "@/components/mercadopago-payment";
-import { quoteLoyaltyReward } from "@/lib/loyalty.functions";
 
 export const Route = createFileRoute("/")({
   component: CustomerHome,
@@ -65,54 +61,8 @@ type Product = {
 type CartItem = { product: Product; qty: number; notes: string };
 type View = "list" | "detail" | "cart" | "checkout";
 type ActiveFilter = "ativos" | "inativos" | "todos";
-type CheckoutPayment = "infinitepay" | "mercadopago";
-type AreaStatus = "idle" | "checking" | "supported" | "unsupported" | "error";
-
-const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
-const WHATSAPP_URL = "https://wa.me/5521984296288?text=" + encodeURIComponent("Olá! Preciso de ajuda com meu pedido no cardápio digital da Hotbox.");
-const NFOOD_URL = "https://oia.99app.com/dlp9/3SsCkm?area=BR";
 
 const MY_ORDERS_KEY = "hb_my_orders";
-const AREA_ACCESS_SESSION_KEY = "hb_area_access_session";
-
-type SavedAreaAccess = {
-  cep?: string;
-  street?: string;
-  neighborhood: string;
-  city?: string;
-  deliveryFee: number;
-  savedAt: number;
-};
-
-function saveAreaAccess(data: SavedAreaAccess) {
-  try {
-    sessionStorage.setItem(AREA_ACCESS_SESSION_KEY, JSON.stringify(data));
-  } catch {
-    /* sessionStorage indisponível */
-  }
-}
-
-function readAreaAccess(): SavedAreaAccess | null {
-  try {
-    const raw = sessionStorage.getItem(AREA_ACCESS_SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as SavedAreaAccess;
-    if (!parsed?.neighborhood || !Number.isFinite(Number(parsed.deliveryFee))) return null;
-    // Mantém a validação apenas durante a sessão atual do navegador.
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function clearAreaAccess() {
-  try {
-    sessionStorage.removeItem(AREA_ACCESS_SESSION_KEY);
-  } catch {
-    /* sessionStorage indisponível */
-  }
-}
-
 function pushMyOrder(id: string) {
   try {
     const raw = localStorage.getItem(MY_ORDERS_KEY);
@@ -131,33 +81,22 @@ function CustomerHome() {
   const [deliveryFee, setDeliveryFee] = useState(0);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [placing, setPlacing] = useState(false);
+  const [pixKey, setPixKey] = useState("");
+  const [pixCopiaCola, setPixCopiaCola] = useState("");
   const [bannerUrl, setBannerUrl] = useState<string | null>(null);
   const [bannerTagline, setBannerTagline] = useState(
     "Batatas recheadas, hambúrgueres artesanais e porções irresistíveis. Direto do forno pra sua casa.",
   );
   const [deliveryTime, setDeliveryTime] = useState<number | null>(null);
-  const [infinitepayEnabled, setInfinitepayEnabled] = useState(false);
-  const [paymentProvider, setPaymentProvider] = useState<CheckoutPayment>("infinitepay");
-  const [paymentAvailable, setPaymentAvailable] = useState(false);
-  const [mercadoPagoPublicKey, setMercadoPagoPublicKey] = useState("");
-  const [mercadoPagoMaxInstallments, setMercadoPagoMaxInstallments] = useState(1);
-  const [mpCheckout, setMpCheckout] = useState<{ id: string; total: number } | null>(null);
-  const [ifoodStoreLink, setIfoodStoreLink] = useState("");
+  const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [cashEnabled, setCashEnabled] = useState(true);
   const [pixEnabled, setPixEnabled] = useState(true);
   const [cardEnabled, setCardEnabled] = useState(true);
-  const [digitalMenuEnabled, setDigitalMenuEnabled] = useState(true);
-  const [configLoaded, setConfigLoaded] = useState(false);
-  const [customerSession, setCustomerSession] = useState<Session | null>(null);
-  const [areaStatus, setAreaStatus] = useState<AreaStatus>("idle");
-  const [accessCep, setAccessCep] = useState("");
-  const [manualNeighborhood, setManualNeighborhood] = useState("");
-  const [manualAreaMode, setManualAreaMode] = useState(false);
-  const [areaMessage, setAreaMessage] = useState("");
-  const [validatedNeighborhood, setValidatedNeighborhood] = useState("");
+  const [pixQrUrl, setPixQrUrl] = useState("");
 
 
   const [couponInput, setCouponInput] = useState("");
-  const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; discount: number; loyalty?: boolean } | null>(null);
+  const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; discount: number } | null>(null);
   const [couponError, setCouponError] = useState("");
   const [checkingCoupon, setCheckingCoupon] = useState(false);
 
@@ -180,36 +119,9 @@ function CustomerHome() {
     neighborhood: "",
     city: "",
     cep: "",
-    payment: "infinitepay" as CheckoutPayment,
+    payment: "pix" as "pix" | "card" | "cash",
+    changeFor: "",
   });
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setCustomerSession(data.session));
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setCustomerSession(session));
-    return () => listener.subscription.unsubscribe();
-  }, []);
-
-  // O login OAuth do Google sai do site e volta para a página inicial.
-  // Preservamos a área que JÁ foi validada nesta mesma aba para não obrigar
-  // o cliente a digitar o CEP novamente depois de entrar no Clube HotBox.
-  useEffect(() => {
-    const saved = readAreaAccess();
-    if (!saved) return;
-    setAccessCep(saved.cep || "");
-    setValidatedNeighborhood(saved.neighborhood);
-    setDeliveryFee(Number(saved.deliveryFee || 0));
-    setForm((current) => ({
-      ...current,
-      deliveryMode: "delivery",
-      cep: saved.cep || current.cep,
-      street: saved.street || current.street,
-      neighborhood: saved.neighborhood,
-      city: saved.city || current.city,
-    }));
-    setManualAreaMode(false);
-    setAreaMessage("");
-    setAreaStatus("supported");
-  }, []);
 
   useEffect(() => {
     supabase
@@ -220,191 +132,53 @@ function CustomerHome() {
       .order("category")
       .order("name")
       .then(({ data }) => setProducts((data as Product[]) ?? []));
-    Promise.all([
-      supabase
-        .from("store_config_public")
-        .select(
-          "store_name,default_delivery_fee,estimated_delivery_time_minutes,banner_image_url,banner_tagline,digital_menu_enabled,digital_menu_pix_enabled,digital_menu_card_enabled,infinitepay_enabled,ifood_store_link",
-        )
-        .maybeSingle(),
-      (supabase as any).rpc("get_public_payment_config"),
-    ]).then(([storeResult, paymentResult]: any[]) => {
-      const data = storeResult?.data;
-      if (data) {
-        setStoreName(data.store_name ?? "HotBox Delivery");
-        setDeliveryFee(Number(data.default_delivery_fee ?? 0));
-        setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
-        setBannerUrl(data.banner_image_url ?? null);
-        setInfinitepayEnabled((data as any).infinitepay_enabled === true);
-        setIfoodStoreLink(String((data as any).ifood_store_link || ""));
-        setDigitalMenuEnabled((data as any).digital_menu_enabled !== false);
-        setPixEnabled((data as any).digital_menu_pix_enabled !== false);
-        setCardEnabled((data as any).digital_menu_card_enabled !== false);
-        if (data.banner_tagline) setBannerTagline(data.banner_tagline);
-      }
-      const pay = paymentResult?.data || {};
-      const provider: CheckoutPayment = pay.provider === "mercadopago" ? "mercadopago" : "infinitepay";
-      setPaymentProvider(provider);
-      setPaymentAvailable(pay.payment_available === true);
-      setMercadoPagoPublicKey(String(pay.mercadopago_public_key || ""));
-      setMercadoPagoMaxInstallments(Math.min(12, Math.max(1, Number(pay.mercadopago_max_installments || 1))));
-      setForm((current) => ({ ...current, payment: provider }));
-      setConfigLoaded(true);
-    }).catch((error) => {
-      console.error("[cardapio] falha ao carregar configurações", error);
-      setConfigLoaded(true);
-    });
+    supabase
+      .from("store_config_public")
+      .select(
+        "store_name,default_delivery_fee,pix_key,pix_copia_cola,estimated_delivery_time_minutes,banner_image_url,banner_tagline,stripe_enabled,digital_menu_cash_enabled,digital_menu_pix_enabled,digital_menu_card_enabled",
+      )
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) {
+          setStoreName(data.store_name ?? "HotBox Delivery");
+          setDeliveryFee(Number(data.default_delivery_fee ?? 0));
+          setPixKey(data.pix_key ?? "");
+          setPixCopiaCola(data.pix_copia_cola ?? "");
+          setDeliveryTime(data.estimated_delivery_time_minutes ?? null);
+          setBannerUrl(data.banner_image_url ?? null);
+          setStripeEnabled((data as any).stripe_enabled === true);
+          setCashEnabled((data as any).digital_menu_cash_enabled !== false);
+          setPixEnabled((data as any).digital_menu_pix_enabled !== false);
+          setCardEnabled((data as any).digital_menu_card_enabled !== false);
+          if (data.banner_tagline) setBannerTagline(data.banner_tagline);
+        }
+      });
   }, []);
 
   useEffect(() => {
-    if (form.payment !== paymentProvider) setForm((current) => ({ ...current, payment: paymentProvider }));
-  }, [form.payment, paymentProvider]);
+    const available = [
+      pixEnabled ? "pix" : null,
+      cardEnabled && stripeEnabled ? "card" : null,
+      cashEnabled ? "cash" : null,
+    ].filter(Boolean) as Array<"pix" | "card" | "cash">;
+    if (!available.includes(form.payment) && available[0]) {
+      setForm((current) => ({ ...current, payment: available[0] }));
+    }
+  }, [pixEnabled, cardEnabled, stripeEnabled, cashEnabled]);
 
   useEffect(() => {
-    const n = String(customerSession?.user?.user_metadata?.full_name || customerSession?.user?.user_metadata?.name || "").trim();
-    if (n) setForm((current) => current.name ? current : { ...current, name: n });
-  }, [customerSession?.user?.id]);
+    const code = pixCopiaCola || pixKey;
+    if (!code) { setPixQrUrl(""); return; }
+    QRCode.toDataURL(code, { width: 280, margin: 1, errorCorrectionLevel: "M" })
+      .then(setPixQrUrl)
+      .catch(() => setPixQrUrl(""));
+  }, [pixCopiaCola, pixKey]);
 
-
-
-  function redirectOutsideArea() {
-    const target = ifoodStoreLink.trim();
-    if (target) {
-      window.location.replace(target);
-      return;
-    }
-    window.location.replace(WHATSAPP_URL);
-  }
-  async function checkDeliveryArea(neighborhood: string, street?: string) {
-    const { data, error } = await (supabase as any).rpc("check_delivery_area_public", {
-      p_neighborhood: neighborhood,
-      p_street: street || null,
-    });
-    if (error) throw error;
-    return data as {
-      supported: boolean;
-      neighborhood?: string | null;
-      fee?: number | string | null;
-      reason?: string | null;
-      matched_zone?: boolean;
-    };
-  }
-
-  async function validateCepAccess() {
-    const cep = onlyDigits(accessCep);
-    if (cep.length !== 8) {
-      setAreaStatus("error");
-      setAreaMessage("Digite um CEP válido com 8 números.");
-      return;
-    }
-    setAreaStatus("checking");
-    setAreaMessage("");
-    try {
-      const response = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-      if (!response.ok) throw new Error("Falha ao consultar CEP");
-      const address = await response.json();
-      if (address?.erro) throw new Error("CEP não encontrado");
-      if (!address?.bairro) {
-        setManualAreaMode(true);
-        setAreaStatus("error");
-        setAreaMessage("Encontramos o CEP, mas ele não informou o bairro. Digite seu bairro abaixo para continuar.");
-        setForm((current) => ({
-          ...current,
-          cep,
-          street: address?.logradouro || current.street,
-          city: address?.localidade || current.city,
-        }));
-        return;
-      }
-      const quote = await checkDeliveryArea(address.bairro, address.logradouro || undefined);
-      if (!quote?.supported) {
-        setValidatedNeighborhood(address.bairro);
-        redirectOutsideArea();
-        return;
-      }
-      const fee = Number(quote.fee ?? deliveryFee ?? 0);
-      setDeliveryFee(Number.isFinite(fee) ? fee : 0);
-      setValidatedNeighborhood(String(quote.neighborhood || address.bairro));
-      const supportedNeighborhood = String(quote.neighborhood || address.bairro);
-      setForm((current) => ({
-        ...current,
-        deliveryMode: "delivery",
-        cep,
-        street: address.logradouro || current.street,
-        neighborhood: supportedNeighborhood,
-        city: address.localidade || current.city,
-      }));
-      saveAreaAccess({
-        cep,
-        street: address.logradouro || "",
-        neighborhood: supportedNeighborhood,
-        city: address.localidade || "",
-        deliveryFee: Number.isFinite(fee) ? fee : 0,
-        savedAt: Date.now(),
-      });
-      setAreaStatus("supported");
-      setAreaMessage("");
-      toast.success("Entrega disponível para o seu endereço!");
-    } catch (error) {
-      console.error(error);
-      setAreaStatus("error");
-      setManualAreaMode(true);
-      setAreaMessage("Não conseguimos consultar esse CEP agora. Você pode informar seu bairro manualmente.");
-    }
-  }
-
-  async function validateManualNeighborhood() {
-    const neighborhood = manualNeighborhood.trim();
-    if (neighborhood.length < 3) {
-      setAreaStatus("error");
-      setAreaMessage("Informe o nome do bairro para continuar.");
-      return;
-    }
-    setAreaStatus("checking");
-    try {
-      const quote = await checkDeliveryArea(neighborhood);
-      if (!quote?.supported) {
-        setValidatedNeighborhood(neighborhood);
-        redirectOutsideArea();
-        return;
-        setAreaMessage(`No momento a entrega própria não atende ${neighborhood}.`);
-        return;
-      }
-      const fee = Number(quote.fee ?? deliveryFee ?? 0);
-      setDeliveryFee(Number.isFinite(fee) ? fee : 0);
-      setValidatedNeighborhood(String(quote.neighborhood || neighborhood));
-      const supportedNeighborhood = String(quote.neighborhood || neighborhood);
-      setForm((current) => ({
-        ...current,
-        deliveryMode: "delivery",
-        neighborhood: supportedNeighborhood,
-      }));
-      saveAreaAccess({
-        neighborhood: supportedNeighborhood,
-        deliveryFee: Number.isFinite(fee) ? fee : 0,
-        savedAt: Date.now(),
-      });
-      setAreaStatus("supported");
-      setAreaMessage("");
-      toast.success("Pronto! Confira o cardápio disponível para você.");
-    } catch (error) {
-      console.error(error);
-      setAreaStatus("error");
-      setAreaMessage("Não foi possível validar o bairro agora. Tente novamente.");
-    }
-  }
-
-  function resetAreaAccess() {
-    clearAreaAccess();
-    setAreaStatus("idle");
-    setAreaMessage("");
-    setValidatedNeighborhood("");
-    setAccessCep("");
-    setManualNeighborhood("");
-    setManualAreaMode(false);
-    setCart([]);
-    setView("list");
-    setForm((current) => ({ ...current, street: "", number: "", complement: "", neighborhood: "", city: "", cep: "" }));
+  async function copyPixCode() {
+    const code = pixCopiaCola || pixKey;
+    if (!code) return;
+    await navigator.clipboard.writeText(code);
+    toast.success("Código Pix copiado");
   }
 
   const categories = useMemo(
@@ -442,44 +216,16 @@ function CustomerHome() {
     });
   const totalQty = cart.reduce((s, i) => s + i.qty, 0);
 
-  async function applyCoupon(explicitCode?: string) {
-    const code = String(explicitCode || couponInput).trim().toUpperCase();
+  async function applyCoupon() {
+    const code = couponInput.trim().toUpperCase();
     if (!code) return;
-    const couponPhone = onlyDigits(form.phone);
-    if (couponPhone.length < 10) {
-      setCouponInput(code);
-      setCouponError("Informe seu WhatsApp para validar o cupom. O número já ficará preenchido no checkout.");
-      setView("cart");
-      return;
-    }
     setCheckingCoupon(true);
     setCouponError("");
     try {
-      if (code.startsWith("HB-FIEL-")) {
-        const quoted = await quoteLoyaltyReward({
-          data: {
-            accessToken: customerSession?.access_token || null,
-            code,
-            deliveryMode: form.deliveryMode,
-            items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty })),
-          },
-        });
-        if (!quoted.ok) {
-          setAppliedCoupon(null);
-          setCouponInput(code);
-          setCouponError((quoted as any).reason || "Cupom de fidelidade indisponível.");
-          return;
-        }
-        setCouponInput(code);
-        setAppliedCoupon({ code: quoted.code, discount: Number(quoted.discount || 0), loyalty: true });
-        toast.success(`🔥 Recompensa aplicada: ${quoted.productName} grátis!`);
-        return;
-      }
-
       const { data, error } = await (supabase as any).rpc("validate_coupon_public", {
         p_code: code,
         p_subtotal: subtotal,
-        p_customer_phone: couponPhone,
+        p_customer_phone: onlyDigits(form.phone),
         p_cart: couponCartPayload(),
       });
       if (error) throw error;
@@ -488,8 +234,7 @@ function CustomerHome() {
         setCouponError(data?.reason || "Cupom inválido");
         return;
       }
-      setCouponInput(code);
-      setAppliedCoupon({ code: data.code, discount: Number(data.discount || 0), loyalty: false });
+      setAppliedCoupon({ code: data.code, discount: Number(data.discount || 0) });
       toast.success("Cupom aplicado!");
     } catch (err) {
       console.error(err);
@@ -508,32 +253,11 @@ function CustomerHome() {
 
   useEffect(() => {
     if (!appliedCoupon?.code || !cart.length) return;
-    const couponPhone = onlyDigits(form.phone);
-    if (couponPhone.length < 10) return;
     const timer = window.setTimeout(async () => {
-      if (appliedCoupon.loyalty || appliedCoupon.code.startsWith("HB-FIEL-")) {
-        const quoted = await quoteLoyaltyReward({
-          data: {
-            accessToken: customerSession?.access_token || null,
-            code: appliedCoupon.code,
-            deliveryMode: form.deliveryMode,
-            items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty })),
-          },
-        });
-        if (!quoted.ok) {
-          setAppliedCoupon(null);
-          setCouponError((quoted as any).reason || "A recompensa deixou de ser válida para este carrinho.");
-          return;
-        }
-        const nextDiscount = Number(quoted.discount || 0);
-        setAppliedCoupon((current) => current ? { ...current, discount: nextDiscount, loyalty: true } : current);
-        setCouponError("");
-        return;
-      }
       const { data, error } = await (supabase as any).rpc("validate_coupon_public", {
         p_code: appliedCoupon.code,
         p_subtotal: subtotal,
-        p_customer_phone: couponPhone,
+        p_customer_phone: onlyDigits(form.phone),
         p_cart: couponCartPayload(),
       });
       if (error || !data?.ok) {
@@ -542,11 +266,11 @@ function CustomerHome() {
         return;
       }
       const nextDiscount = Number(data.discount || 0);
-      setAppliedCoupon((current) => current ? { ...current, discount: nextDiscount } : current);
+      setAppliedCoupon((current) => current && current.code === data.code && current.discount === nextDiscount ? current : { code: data.code, discount: nextDiscount });
       setCouponError("");
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [subtotal, form.phone, form.deliveryMode, cart, appliedCoupon?.code, customerSession?.access_token]);
+  }, [subtotal, form.phone, cart, appliedCoupon?.code]);
 
   function openDetail(p: Product) {
     setSelectedProduct(p);
@@ -582,14 +306,15 @@ function CustomerHome() {
     if (!cart.length) return toast.error("Seu carrinho está vazio");
     if (!form.name || !form.phone) return toast.error("Preencha nome e telefone");
     if (isDelivery && (!form.street || !form.number || !form.neighborhood)) return toast.error("Preencha rua, número e bairro");
-    if (isDelivery && areaStatus !== "supported") return toast.error("Valide sua área de entrega antes de finalizar");
-    if (!paymentAvailable) return toast.error("Pagamento online indisponível no momento");
-
+    if (form.payment === "pix" && !(pixCopiaCola || pixKey)) return toast.error("Pix ainda não foi configurado pela loja");
+    if (form.payment === "card" && !stripeEnabled) return toast.error("Cartão indisponível no momento");
+    // A confirmação definitiva do cupom acontece no banco junto com a criação do pedido.
+    // Assim limite geral, limite por cliente e primeira compra não sofrem condição de corrida.
     setPlacing(true);
     try {
-      const { createSiteCheckout } = await import("@/lib/site-checkout.functions");
-      const created: any = await createSiteCheckout({
-        data: {
+      const items = couponCartPayload();
+      const { data: created, error } = await (supabase as any).rpc("create_site_order_secure", {
+        p_order: {
           customer_name: form.name,
           customer_phone: onlyDigits(form.phone),
           delivery_mode: form.deliveryMode,
@@ -599,201 +324,54 @@ function CustomerHome() {
           address_neighborhood: isDelivery ? form.neighborhood || null : null,
           address_city: isDelivery ? form.city || null : null,
           address_cep: isDelivery ? form.cep || null : null,
-          payment_kind: paymentProvider,
-          coupon_code: appliedCoupon?.code || null,
-          access_token: customerSession?.access_token || null,
-          items: cart.map((i) => ({ product_id: i.product.id, qty: i.qty, notes: i.notes || null })),
+          payment_method: form.payment,
+          payment_timing: "now",
+          change_for: null,
+          pix_code: form.payment === "pix" ? pixCopiaCola || pixKey || null : null,
+          delivery_fee: isDelivery ? deliveryFee : 0,
         },
+        p_items: items,
+        p_coupon_code: appliedCoupon?.code || null,
       });
-      if (created?.error) throw new Error(created.error);
-      if (!created?.checkout?.id) throw new Error("Checkout não criado");
+      if (error) throw error;
+      if (!created?.id) throw new Error("Pedido não retornado pelo servidor");
+      const order = { id: created.id, order_number: created.order_number };
 
-      const provider: CheckoutPayment = created.checkout.payment_provider === "mercadopago" ? "mercadopago" : "infinitepay";
-      if (provider === "mercadopago") {
-        setPaymentProvider("mercadopago");
-        setForm((current) => ({ ...current, payment: "mercadopago" }));
-        setMpCheckout({ id: String(created.checkout.id), total: Number(created.checkout.total || total) });
-        window.scrollTo({ top: 0, behavior: "smooth" });
-        return;
+
+      pushMyOrder(order.id);
+
+      if (form.payment === "card") {
+        const { createStripeCheckout } = await import("@/lib/stripe.functions");
+        const res = await createStripeCheckout({ data: { orderId: order.id, origin: window.location.origin } });
+        if ("url" in res && res.url) {
+          setCart([]);
+          window.location.href = res.url;
+          return;
+        }
+        toast.error(("error" in res && res.error) || "Falha ao iniciar pagamento");
+      } else {
+        toast.success(form.payment === "pix"
+          ? `Pedido #${order.order_number} criado. Aguardando confirmação do Pix.`
+          : `Pedido #${order.order_number} criado. Aguardando confirmação do pagamento em dinheiro.`);
       }
 
-      const { createInfinitePayCheckout } = await import("@/lib/infinitepay.functions");
-      const payment = await createInfinitePayCheckout({
-        data: { checkoutId: created.checkout.id, origin: window.location.origin },
-      });
-      if (!("url" in payment) || !payment.url) {
-        const { cancelSiteCheckout } = await import("@/lib/site-checkout.functions");
-        await cancelSiteCheckout({ data: { checkoutId: created.checkout.id, access_token: customerSession?.access_token || null } });
-        throw new Error(("error" in payment && payment.error) || "Não foi possível abrir o pagamento");
-      }
 
       setCart([]);
       removeCoupon();
-      window.location.href = payment.url;
+      nav({ to: "/pedido/$id", params: { id: order.id } });
     } catch (err: any) {
       console.error(err);
-      const message = String(err?.message || "Não foi possível iniciar o pagamento.");
-      if (/fora da área|fora da area|bairro|entrega/i.test(message)) redirectOutsideArea();
-      toast.error(message);
+      const message = String(err?.message || "");
+      if (/cupom|primeira compra|limite|promoção|promocao/i.test(message)) {
+        setAppliedCoupon(null);
+        setCouponError(message.replace(/^.*?:\s*/, ""));
+        toast.error(message.replace(/^.*?:\s*/, ""));
+      } else {
+        toast.error("Não foi possível enviar o pedido. Tente novamente.");
+      }
     } finally {
       setPlacing(false);
     }
-  }
-
-  async function cancelMercadoPagoCheckout() {
-    if (!mpCheckout) return;
-    try {
-      const { cancelSiteCheckout } = await import("@/lib/site-checkout.functions");
-      await cancelSiteCheckout({ data: { checkoutId: mpCheckout.id, access_token: customerSession?.access_token || null } });
-    } catch {}
-    setMpCheckout(null);
-  }
-
-  function finishMercadoPago(orderId?: string | null) {
-    if (orderId) pushMyOrder(orderId);
-    const checkoutId = mpCheckout?.id || "";
-    setCart([]);
-    removeCoupon();
-    setMpCheckout(null);
-    window.location.href = `/obrigado?provider=mercadopago&checkout_id=${encodeURIComponent(checkoutId)}`;
-  }
-
-  if (!configLoaded) {
-    return (
-      <div className="grid min-h-screen place-items-center bg-[#f7f7f7] px-6">
-        <div className="text-center">
-          <Loader2 className="mx-auto size-7 animate-spin text-primary" />
-          <p className="mt-3 text-sm font-semibold text-muted-foreground">Carregando o cardápio...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!digitalMenuEnabled) {
-    return (
-      <div className="grid min-h-screen place-items-center bg-[#f7f7f7] px-5">
-        <div className="w-full max-w-md rounded-[32px] border bg-white p-7 text-center shadow-xl">
-          <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="mx-auto h-24 w-24 rounded-3xl object-contain shadow-sm" />
-          <h1 className="mt-5 font-display text-3xl font-black">Cardápio temporariamente indisponível</h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            Nosso atendimento pelo WhatsApp continua funcionando normalmente. Fale com a Hotbox e fazemos seu pedido por lá.
-          </p>
-          <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-full bg-[#25D366] px-5 py-3.5 text-sm font-black text-white">
-            <MessageCircle className="size-5" /> Pedir pelo WhatsApp
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  if (areaStatus !== "supported") {
-    const outside = areaStatus === "unsupported";
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-[#160805] via-[#4f0f0c] to-[#f7f7f7] px-4 py-8 sm:py-12">
-        <div className="mx-auto max-w-lg">
-          <div className="rounded-[34px] border border-white/10 bg-white p-6 shadow-2xl sm:p-8">
-            <div className="flex items-center gap-3">
-              <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-20 w-20 rounded-3xl object-contain shadow-md" />
-              <div>
-                <p className="font-display text-2xl font-black leading-none">HOT<span className="text-[#d92d20]">BOX</span></p>
-                <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.22em] text-[#d92d20]">Delivery</p>
-              </div>
-            </div>
-
-            {!outside ? (
-              <>
-                <div className="mt-6 rounded-3xl bg-gradient-to-br from-amber-50 to-orange-50 p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="grid size-10 shrink-0 place-items-center rounded-2xl bg-[#ffd400] text-black">
-                      <MapPin className="size-5" />
-                    </div>
-                    <div>
-                      <h1 className="font-display text-xl font-black leading-tight">Veja o cardápio da sua região</h1>
-                      <p className="mt-0.5 text-sm text-muted-foreground">Informe seu CEP para ver produtos, ofertas e valores disponíveis para você.</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-5">
-                  <Label>Seu CEP</Label>
-                  <div className="mt-2 flex gap-2">
-                    <Input
-                      inputMode="numeric"
-                      autoComplete="postal-code"
-                      className="h-12 rounded-2xl text-base"
-                      placeholder="00000-000"
-                      value={accessCep}
-                      onChange={(e) => setAccessCep(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") void validateCepAccess(); }}
-                    />
-                    <Button onClick={validateCepAccess} disabled={areaStatus === "checking"} className="h-12 rounded-2xl px-5 font-black">
-                      {areaStatus === "checking" ? <Loader2 className="size-4 animate-spin" /> : "Continuar"}
-                    </Button>
-                  </div>
-                </div>
-
-                {(manualAreaMode || areaStatus === "error") && (
-                  <div className="mt-4 rounded-2xl border bg-muted/30 p-4">
-                    <Label>Ou informe seu bairro</Label>
-                    <div className="mt-2 flex gap-2">
-                      <Input
-                        className="h-11 rounded-xl"
-                        placeholder="Ex.: Itatiaia"
-                        value={manualNeighborhood}
-                        onChange={(e) => setManualNeighborhood(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") void validateManualNeighborhood(); }}
-                      />
-                      <Button variant="outline" onClick={validateManualNeighborhood} disabled={areaStatus === "checking"} className="h-11 rounded-xl">Validar</Button>
-                    </div>
-                  </div>
-                )}
-
-                {areaMessage && (
-                  <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                    <AlertTriangle className="mt-0.5 size-4 shrink-0" /> {areaMessage}
-                  </div>
-                )}
-
-                {!manualAreaMode && (
-                  <button type="button" onClick={() => setManualAreaMode(true)} className="mt-4 w-full text-center text-xs font-semibold text-muted-foreground underline underline-offset-4">
-                    Não sei meu CEP
-                  </button>
-                )}
-              </>
-            ) : (
-              <>
-                <div className="mt-7 rounded-3xl border border-orange-200 bg-orange-50 p-5">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="mt-0.5 size-6 shrink-0 text-orange-600" />
-                    <div>
-                      <h1 className="font-display text-2xl font-black">Entrega própria indisponível nessa região</h1>
-                      <p className="mt-1 text-sm leading-relaxed text-orange-950/70">{areaMessage}</p>
-                      {validatedNeighborhood && <p className="mt-2 text-sm font-bold text-orange-950">Bairro identificado: {validatedNeighborhood}</p>}
-                    </div>
-                  </div>
-                </div>
-
-                <p className="mt-5 text-sm leading-relaxed text-muted-foreground">
-                  Você não precisa desistir do pedido. Para regiões mais distantes, confira a disponibilidade pelas plataformas parceiras.
-                </p>
-                <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  <a href={ifoodStoreLink || WHATSAPP_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ea1d2c] px-4 py-3 text-center text-sm font-black text-white">Pedir pelo iFood</a>
-                  <a href={NFOOD_URL} target="_blank" rel="noreferrer" className="rounded-2xl bg-[#ff7a00] px-4 py-3 text-center text-sm font-black text-white">Pedir pela 99Food</a>
-                </div>
-                <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" className="mt-2 flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold">
-                  <MessageCircle className="size-4" /> Tirar uma dúvida no WhatsApp
-                </a>
-                <button type="button" onClick={resetAreaAccess} className="mt-4 w-full text-center text-xs font-bold text-muted-foreground underline underline-offset-4">Verificar outro CEP ou bairro</button>
-              </>
-            )}
-
-            <div className="mt-6 flex items-center justify-center gap-2 border-t pt-5 text-xs text-muted-foreground">
-              <ShieldCheck className="size-4 text-emerald-600" /> Seus dados são usados apenas para atendimento e entrega.
-            </div>
-          </div>
-        </div>
-      </div>
-    );
   }
 
   if (view === "detail" && selectedProduct) {
@@ -808,7 +386,7 @@ function CustomerHome() {
             <ArrowLeft className="size-5" />
           </button>
           <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-2xl bg-white/95 p-1.5 shadow-lg backdrop-blur">
-            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="size-9 rounded-xl object-contain" />
+            <img src={hotboxLogo.url} alt="HotBox Delivery" className="size-9 rounded-xl object-cover" />
           </div>
           {p.image_url ? (
             <img src={p.image_url} alt={p.name} className="h-64 w-full object-cover sm:h-80" />
@@ -894,7 +472,7 @@ function CustomerHome() {
           <button onClick={() => setView("list")}>
             <ArrowLeft className="size-5" />
           </button>
-          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-9 rounded-xl object-contain" />
+          <img src={hotboxLogo.url} alt="HotBox" className="size-9 rounded-xl object-cover" />
           <h1 className="font-display text-lg font-black tracking-tight">Sua sacola</h1>
         </header>
 
@@ -909,7 +487,7 @@ function CustomerHome() {
                     <img
                       src={i.product.image_url}
                       alt={i.product.name}
-                      className="size-24 shrink-0 rounded-2xl object-contain"
+                      className="size-24 shrink-0 rounded-2xl object-cover"
                     />
                   ) : (
                     <div className="grid size-16 shrink-0 place-items-center rounded-xl bg-muted text-[9px] text-muted-foreground">
@@ -973,43 +551,20 @@ function CustomerHome() {
                   </button>
                 </div>
               ) : (
-                <div className="mt-2 space-y-2.5">
-                  <div className="flex gap-2">
-                    <Input
-                      className="rounded-full uppercase"
-                      placeholder="Código do cupom"
-                      value={couponInput}
-                      onChange={(e) => {
-                        setCouponInput(e.target.value.toUpperCase());
-                        if (couponError) setCouponError("");
-                      }}
-                      onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
-                    />
-                    <Button variant="outline" className="rounded-full" onClick={() => void applyCoupon()} disabled={checkingCoupon}>
-                      {checkingCoupon ? <Loader2 className="size-4 animate-spin" /> : "Aplicar"}
-                    </Button>
-                  </div>
-                  <div className="rounded-2xl bg-muted/35 p-3">
-                    <Label className="text-xs font-bold">WhatsApp para validar o cupom</Label>
-                    <Input
-                      inputMode="tel"
-                      autoComplete="tel"
-                      className="mt-1.5 rounded-full bg-background"
-                      placeholder="(00) 00000-0000"
-                      value={formatPhone(form.phone)}
-                      onChange={(e) => {
-                        setForm((current) => ({ ...current, phone: e.target.value }));
-                        if (couponError) setCouponError("");
-                      }}
-                      onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
-                    />
-                    <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                      Usamos o número apenas para validar as regras do cupom. Ele já ficará preenchido na finalização do pedido.
-                    </p>
-                  </div>
+                <div className="mt-1.5 flex gap-2">
+                  <Input
+                    className="rounded-full uppercase"
+                    placeholder="Código do cupom"
+                    value={couponInput}
+                    onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => e.key === "Enter" && applyCoupon()}
+                  />
+                  <Button variant="outline" className="rounded-full" onClick={applyCoupon} disabled={checkingCoupon}>
+                    Aplicar
+                  </Button>
                 </div>
               )}
-              {couponError && <p className="mt-2 text-xs font-semibold text-destructive">{couponError}</p>}
+              {couponError && <p className="mt-1 text-xs font-semibold text-destructive">{couponError}</p>}
 
               <div className="mt-3 flex justify-between text-sm text-foreground/70">
                 <span>Subtotal</span>
@@ -1021,12 +576,9 @@ function CustomerHome() {
                   <span>-{brl(couponDiscount)}</span>
                 </div>
               )}
-              <div className="mt-4 flex items-center justify-between rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3">
-                <div>
-                  <span className="block text-xs font-black uppercase tracking-wide text-amber-900">Taxa de entrega</span>
-                  <span className="text-[11px] text-amber-800/80">Já incluída no total abaixo</span>
-                </div>
-                <span className="text-xl font-black text-amber-950">{isDelivery ? brl(deliveryFee) : "Retirada"}</span>
+              <div className="flex justify-between text-sm text-foreground/70">
+                <span>Taxa de entrega</span>
+                <span>{isDelivery ? brl(deliveryFee) : "Retirada"}</span>
               </div>
               <div className="mt-2 flex justify-between border-t pt-2 text-lg font-extrabold">
                 <span>Total</span>
@@ -1060,7 +612,7 @@ function CustomerHome() {
           <button onClick={() => setView("cart")}>
             <ArrowLeft className="size-5" />
           </button>
-          <img src={HOTBOX_LOGO_URL} alt="HotBox" className="size-9 rounded-xl object-contain" />
+          <img src={hotboxLogo.url} alt="HotBox" className="size-9 rounded-xl object-cover" />
           <h1 className="font-display text-lg font-black tracking-tight">Finalizar compra</h1>
         </header>
 
@@ -1142,109 +694,94 @@ function CustomerHome() {
                   <div>
                     <Label>Bairro</Label>
                     <Input
-                      className="mt-1 rounded-xl bg-muted/40"
+                      className="mt-1 rounded-xl"
                       value={form.neighborhood}
-                      readOnly={areaStatus === "supported"}
                       onChange={(e) => setForm({ ...form, neighborhood: e.target.value })}
                     />
                   </div>
                   <div>
                     <Label>Cidade</Label>
                     <Input
-                      className="mt-1 rounded-xl bg-muted/40"
+                      className="mt-1 rounded-xl"
                       value={form.city}
-                      readOnly={!!form.city && areaStatus === "supported"}
                       onChange={(e) => setForm({ ...form, city: e.target.value })}
                     />
                   </div>
                 </div>
                 <div>
-                  <div className="flex items-center justify-between">
-                    <Label>CEP</Label>
-                    <button type="button" onClick={resetAreaAccess} className="text-[11px] font-bold text-primary underline underline-offset-2">Trocar CEP/bairro</button>
-                  </div>
+                  <Label>CEP</Label>
                   <Input
-                    className="mt-1 rounded-xl bg-muted/40"
+                    className="mt-1 rounded-xl"
                     placeholder="00000-000"
                     value={form.cep}
-                    readOnly={!!form.cep && areaStatus === "supported"}
                     onChange={(e) => setForm({ ...form, cep: e.target.value })}
                   />
-                  <div className="mt-3 rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-4">
-                    <div className="flex items-center gap-2 text-sm font-black text-emerald-900">
-                      <CheckCircle2 className="size-5" /> Entregamos no seu endereço
-                    </div>
-                    <div className="mt-2 flex items-end justify-between gap-3">
-                      <span className="text-xs font-bold uppercase tracking-wide text-emerald-800">Taxa de entrega</span>
-                      <span className="text-2xl font-black text-emerald-950">{brl(deliveryFee)}</span>
-                    </div>
-                  </div>
                 </div>
               </div>
             </div>
           )}
 
           <div>
-            <div className="mb-3">
-              <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Pagamento seguro</h3>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                Pix e cartão são confirmados automaticamente. Seu pedido só entra na operação depois da confirmação real do pagamento.
-              </p>
+            <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">Forma de pagamento</h3>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                ...(pixEnabled ? [{ v: "pix", label: "Pix", icon: QrCode }] : []),
+                ...(cardEnabled && stripeEnabled ? [{ v: "card", label: "Cartão", icon: CreditCard }] : []),
+                ...(cashEnabled ? [{ v: "cash", label: "Dinheiro", icon: Banknote }] : []),
+              ].map((opt) => (
+                <button
+                  key={opt.v}
+                  onClick={() => setForm({ ...form, payment: opt.v as any })}
+                  className={`flex flex-col items-center gap-1 rounded-2xl border-2 py-3 text-xs font-bold transition ${form.payment === opt.v ? "border-primary bg-primary/5 text-primary" : "border-border text-foreground/60"}`}
+                >
+                  <opt.icon className="size-5" /> {opt.label}
+                </button>
+              ))}
             </div>
 
-            {mpCheckout ? (
-              <MercadoPagoPayment
-                checkoutId={mpCheckout.id}
-                amount={mpCheckout.total}
-                publicKey={mercadoPagoPublicKey}
-                maxInstallments={mercadoPagoMaxInstallments}
-                customerEmail={customerSession?.user?.email || null}
-                origin={typeof window !== "undefined" ? window.location.origin : ""}
-                onPaid={finishMercadoPago}
-                onCancel={cancelMercadoPagoCheckout}
-              />
-            ) : (
-              <>
-                <div className="rounded-2xl border-2 border-primary bg-primary/5 p-4">
-                  <div className="flex items-center gap-3">
-                    <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground"><ShieldCheck className="size-5" /></span>
-                    <div>
-                      <p className="text-sm font-black">Pix ou cartão</p>
-                      <p className="text-[11px] text-muted-foreground">{paymentProvider === "mercadopago" ? "Pagamento rápido sem sair da HotBox" : "Pagamento seguro pela InfinitePay"}</p>
-                    </div>
+
+            {form.payment === "pix" && (
+              <div className="mt-4 rounded-3xl border border-amber-200 bg-amber-50/70 p-4">
+                <div className="flex items-start gap-4">
+                  {pixQrUrl && <img src={pixQrUrl} alt="QR Code Pix" className="size-32 rounded-2xl border bg-white p-2" />}
+                  <div className="min-w-0 flex-1">
+                    <p className="font-bold text-amber-950">Pague antes do preparo</p>
+                    <p className="mt-1 text-xs leading-relaxed text-amber-900/70">Escaneie o QR Code ou copie o código Pix. O pedido fica aguardando confirmação do pagamento e nunca será cobrado na entrega.</p>
+                    <button type="button" onClick={copyPixCode} className="mt-3 inline-flex items-center gap-2 rounded-full bg-black px-4 py-2 text-xs font-bold text-white">
+                      <Copy className="size-3.5" /> Copiar código Pix
+                    </button>
                   </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
-                    <div className="flex items-center gap-2 rounded-xl bg-white p-2"><QrCode className="size-4" /> Pix com QR Code</div>
-                    <div className="flex items-center gap-2 rounded-xl bg-white p-2"><CreditCard className="size-4" /> Cartão de crédito</div>
-                  </div>
-                  <p className="mt-3 text-xs leading-relaxed text-emerald-900">
-                    {paymentProvider === "mercadopago" ? "Ao continuar, o pagamento abre aqui mesmo. No Pix, o QR Code aparece na HotBox; no cartão, a confirmação do banco só aparece quando necessária." : "Na próxima tela você escolhe Pix ou cartão. Seu pedido só entra em preparo depois da confirmação do pagamento."}
-                  </p>
                 </div>
-                {!paymentAvailable && (
-                  <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-900">
-                    Pagamento online temporariamente indisponível. Fale conosco pelo WhatsApp para fazer seu pedido.
-                  </div>
-                )}
-              </>
+              </div>
+            )}
+
+            {form.payment === "cash" && (
+              <div className="mt-4 rounded-3xl border border-red-200 bg-red-50 p-4 text-sm">
+                <p className="font-bold text-red-950">Pagamento em dinheiro é antecipado</p>
+                <p className="mt-1 text-xs leading-relaxed text-red-900/70">O pedido será criado como aguardando pagamento. A loja precisa confirmar o recebimento antes do preparo. Não existe pagamento em dinheiro na entrega.</p>
+              </div>
+            )}
+
+            {form.payment === "card" && (
+              <p className="mt-3 text-xs text-muted-foreground">
+                Você será redirecionado para o checkout seguro do Stripe. O pedido só entra no fluxo operacional depois que o Stripe confirmar o pagamento.
+              </p>
             )}
           </div>
         </div>
 
-        {!mpCheckout && (
-          <div className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 backdrop-blur">
-            <div className="mx-auto max-w-2xl">
-              <Button
-                onClick={placeOrder}
-                disabled={placing || !paymentAvailable}
-                className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
-              >
-                <span>{placing ? "Preparando pagamento..." : paymentProvider === "mercadopago" ? "Pagar com Pix ou cartão" : "Continuar para pagamento"}</span>
-                <span>{brl(total)}</span>
-              </Button>
-            </div>
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 backdrop-blur">
+          <div className="mx-auto max-w-2xl">
+            <Button
+              onClick={placeOrder}
+              disabled={placing}
+              className="w-full justify-between rounded-full bg-[#ffd400] py-6 text-base font-black text-black shadow-md hover:bg-[#f4ca00]"
+            >
+              <span>{placing ? "Processando..." : form.payment === "card" ? "Ir para pagamento" : "Criar pedido"}</span>
+              <span>{brl(total)}</span>
+            </Button>
           </div>
-        )}
+        </div>
       </div>
     );
   }
@@ -1252,22 +789,19 @@ function CustomerHome() {
   return (
     <div className="min-h-screen bg-[#f7f7f7] pb-28">
       <div className="sticky top-0 z-50 border-b border-black/5 bg-white/95 px-4 py-3 backdrop-blur">
-        <div className="mx-auto flex max-w-2xl items-center gap-3">
-          <Link to="/" className="flex min-w-0 items-center gap-2.5">
-            <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-12 w-12 rounded-2xl object-contain shadow-sm ring-1 ring-black/10" />
-            <div className="min-w-0 leading-tight">
-              <p className="font-display text-lg font-black">HOT<span className="text-[#d92d20]">BOX</span></p>
-              <p className="truncate text-[10px] font-bold uppercase tracking-widest text-[#d92d20]">{validatedNeighborhood || "Delivery"}</p>
+        <div className="mx-auto max-w-2xl">
+          <Link to="/" className="flex items-center gap-2.5">
+            <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-12 w-12 rounded-2xl object-cover shadow-sm ring-1 ring-black/10" />
+            <div className="leading-tight">
+              <p className="font-display text-lg font-black">
+                HOT<span className="text-[#d92d20]">BOX</span>
+              </p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#d92d20]">Delivery</p>
             </div>
+            <Link to="/admin/login" className="ml-auto text-[11px] text-muted-foreground hover:text-foreground">
+              Área da loja
+            </Link>
           </Link>
-          <div className="ml-auto flex items-center gap-1.5">
-            <button type="button" onClick={resetAreaAccess} title="Trocar endereço" className="grid size-9 place-items-center rounded-full border bg-white text-muted-foreground transition hover:text-foreground">
-              <MapPin className="size-4" />
-            </button>
-            <a href={WHATSAPP_URL} target="_blank" rel="noreferrer" title="Ajuda pelo WhatsApp" className="grid size-9 place-items-center rounded-full bg-[#25D366] text-white shadow-sm">
-              <MessageCircle className="size-4" />
-            </a>
-          </div>
         </div>
       </div>
 
@@ -1300,11 +834,8 @@ function CustomerHome() {
                 <Clock className="size-4" /> {deliveryTime}-{deliveryTime + 15} min
               </span>
             )}
-            <span className="flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1.5 backdrop-blur">
-              <MapPin className="size-4" /> {validatedNeighborhood || "Entrega"}
-            </span>
-            <span className="flex items-center gap-1.5 rounded-full bg-[#ffd400] px-3 py-1.5 font-black text-black shadow-sm">
-              <Bike className="size-4" /> Taxa de entrega: {deliveryFee > 0 ? brl(deliveryFee) : "grátis"}
+            <span className="flex items-center gap-1.5">
+              <MapPin className="size-4" /> Entrega {deliveryFee > 0 ? brl(deliveryFee) : "grátis"}
             </span>
           </div>
         </div>
@@ -1339,23 +870,6 @@ function CustomerHome() {
       </header>
 
       <main className="mx-auto max-w-2xl px-4 py-5">
-        {!query && activeCategory === "Tudo" && (
-          <div className="mb-5">
-            <CustomerLoyaltyClub
-              session={customerSession}
-              onSessionChange={setCustomerSession}
-              onUseReward={(code) => {
-                setCouponInput(code);
-                if (!cart.length) {
-                  toast.info("Adicione sua batata ao carrinho e depois use o cupom no carrinho.");
-                  return;
-                }
-                setView("cart");
-                window.setTimeout(() => void applyCoupon(code), 0);
-              }}
-            />
-          </div>
-        )}
         {!products.length ? (
           <div className="rounded-xl border border-dashed py-16 text-center">
             <p className="text-muted-foreground">Cardápio vazio. Volte em breve!</p>
@@ -1420,7 +934,7 @@ function CustomerHome() {
                       className="flex w-full items-center gap-4 rounded-[24px] border border-black/5 bg-white p-3.5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
                     >
                       {p.image_url ? (
-                        <img src={p.image_url} alt={p.name} className="size-24 shrink-0 rounded-2xl object-contain" />
+                        <img src={p.image_url} alt={p.name} className="size-24 shrink-0 rounded-2xl object-cover" />
                       ) : (
                         <div className="grid size-16 shrink-0 place-items-center rounded-xl bg-muted text-[9px] text-muted-foreground">
                           Sem foto

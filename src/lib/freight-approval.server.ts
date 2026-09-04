@@ -11,10 +11,7 @@
  *     - sem resposta em 30s -> expira e o valor calculado é liberado.
  */
 
-export type FreightApprovalOutcome = {
-  status: "approved" | "rejected" | "expired";
-  fee: number | null;
-};
+export type FreightApprovalOutcome = "approved" | "rejected" | "expired";
 
 const WINDOW_MS = 30_000;
 const POLL_MS = 1_500;
@@ -47,11 +44,11 @@ export async function requestFreightApproval(
       })
       .select("id")
       .single();
-    if (error || !data) return { status: "expired", fee: input.fee };
+    if (error || !data) return "expired";
     approvalId = data.id as string;
   } catch {
     // Se nem conseguimos criar a solicitação, não travamos o atendimento.
-    return { status: "expired", fee: input.fee };
+    return "expired";
   }
 
   const deadline = Date.now() + WINDOW_MS;
@@ -60,12 +57,12 @@ export async function requestFreightApproval(
     try {
       const { data } = await supabaseAdmin
         .from("pending_freight_approvals")
-        .select("status, fee")
+        .select("status")
         .eq("id", approvalId)
         .maybeSingle();
       const status = data?.status as string | undefined;
-      if (status === "approved") return { status: "approved", fee: data?.fee == null ? input.fee : Number(data.fee) };
-      if (status === "rejected") return { status: "rejected", fee: data?.fee == null ? input.fee : Number(data.fee) };
+      if (status === "approved") return "approved";
+      if (status === "rejected") return "rejected";
     } catch {
       /* segue tentando até o prazo */
     }
@@ -80,5 +77,5 @@ export async function requestFreightApproval(
   } catch {
     /* ignora */
   }
-  return { status: "expired", fee: input.fee };
+  return "expired";
 }

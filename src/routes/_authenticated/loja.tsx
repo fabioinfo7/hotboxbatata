@@ -38,13 +38,10 @@ import {
   ChevronRight,
   Ticket,
   ThumbsUp,
-  WalletCards,
-  Trophy,
 } from "lucide-react";
+import hotboxLogo from "@/assets/hotbox-logo.png.asset.json";
 import { FreightApprovalPopup } from "@/components/freight-approval-popup";
 import { AutoPrintReceipt } from "@/components/auto-print-receipt";
-
-const HOTBOX_LOGO_URL = "/images/logo-hotbox.jpeg";
 
 export const Route = createFileRoute("/_authenticated/loja")({
   component: AdminLayout,
@@ -281,8 +278,6 @@ function AdminLayout() {
       items: [
         { to: "/loja/pedidos", label: "Histórico", icon: History },
         { to: "/loja/financeiro", label: "Financeiro", icon: TrendingUp },
-        { to: "/loja/financeiro-cardapio", label: "Financeiro Cardápio", icon: WalletCards },
-        { to: "/loja/fidelidade", label: "Clube HotBox", icon: Trophy },
         { to: "/loja/receber", label: "A Receber", icon: HandCoins },
         { to: "/loja/leads", label: "Leads", icon: Users },
         { to: "/loja/avaliacoes", label: "Avaliações", icon: ThumbsUp },
@@ -387,7 +382,7 @@ function AdminLayout() {
           <aside className="sticky top-0 z-30 hidden h-screen w-64 shrink-0 flex-col justify-between overflow-y-auto bg-foreground px-4 py-5 lg:flex">
             <div>
               <Link to="/loja/dashboard" className="mb-6 flex items-center gap-3 px-1">
-                <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-14 w-14 rounded-xl object-contain shadow" />
+                <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-11 w-11 rounded-xl object-cover shadow" />
                 <div className="leading-tight">
                   <p className="font-display text-lg font-black text-background">
                     HOT<span className="text-primary">BOX</span>
@@ -497,7 +492,7 @@ function AdminLayout() {
 
           <header className="sticky top-0 z-30 flex items-center justify-between border-b bg-foreground px-4 py-3 lg:hidden">
             <Link to="/loja/dashboard" className="flex items-center gap-2">
-              <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-11 w-11 rounded-lg object-contain" />
+              <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-9 w-9 rounded-lg object-cover" />
               <span className="font-display font-bold text-background">
                 HOT<span className="text-primary">BOX</span>
               </span>
@@ -522,7 +517,7 @@ function AdminLayout() {
         <>
           <header className="sticky top-0 z-30 flex items-center gap-1 overflow-x-auto border-b bg-foreground px-4 py-2.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <Link to="/loja/dashboard" className="mr-3 flex shrink-0 items-center gap-2">
-              <img src={HOTBOX_LOGO_URL} alt="HotBox Delivery" className="h-10 w-10 rounded-lg object-contain" />
+              <img src={hotboxLogo.url} alt="HotBox Delivery" className="h-8 w-8 rounded-lg object-cover" />
             </Link>
             {nav_pinned.map((n) => {
               const Icon = n.icon;

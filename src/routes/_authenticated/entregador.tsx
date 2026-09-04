@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { getAlarmAudio, setAlarmSrc, playAlarm, pauseAlarm, playAlarmBeep, stopAlarmBeep, primeBeepUnlock } from "@/lib/alarm-audio";
 import { brl, formatDateTime, formatPhone, ORDER_STATUS_LABEL } from "@/lib/formatters";
-import { brasiliaDateISO, brasiliaLocalToUtcISO, brasiliaPeriodStartISO } from "@/lib/brasilia-date";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -88,7 +87,10 @@ function itemsSummary(items: Item[]) {
 }
 
 function periodStartISO(days: number) {
-  return brasiliaPeriodStartISO(days);
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - Math.max(0, days - 1));
+  return d.toISOString();
 }
 
 const DISMISSED_KEY = "hb_dismissed_orders";
@@ -116,14 +118,15 @@ function DelivererApp() {
   const [todayEarnings, setTodayEarnings] = useState({ total: 0, count: 0 });
 
   async function loadTodayEarnings() {
-    const startISO = brasiliaLocalToUtcISO(brasiliaDateISO(), 0, 0, 0, 0);
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
     const { data } = await supabase
       .from("orders")
       .select("delivery_fee,deliverer_paid_at")
       .eq("deliverer_id", userId)
       .eq("status", "delivered")
       .is("deliverer_paid_at", null)
-      .gte("delivered_at", startISO);
+      .gte("delivered_at", start.toISOString());
     const list = data ?? [];
     setTodayEarnings({ total: list.reduce((s, o: any) => s + Number(o.delivery_fee || 0), 0), count: list.length });
   }

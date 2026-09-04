@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { MapPin, Phone, Truck, Timer, Info, Edit2 } from "lucide-react";
+import { MapPin, Phone, Truck, Timer, Info } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 type Approval = {
@@ -38,22 +38,12 @@ function InfoTip({ text }: { text: string }) {
  * Popup global da loja: sempre que a IA calcular uma taxa de entrega, ela
  * pausa e pede autorização aqui. O gerente tem 30 segundos — se não responder,
  * o popup some sozinho e a IA informa o valor calculado ao cliente.
- *
- * O operador pode manter o valor calculado OU digitar um valor diferente antes
- * de confirmar. O valor confirmado (seja o original ou o editado) é salvo no
- * banco e usado pela IA no resumo e no total — nunca é sobrescrito pelo cálculo
- * automático depois.
  */
 export function FreightApprovalPopup() {
   const [item, setItem] = useState<Approval | null>(null);
   const [left, setLeft] = useState(30);
   const [costPerKm, setCostPerKm] = useState(0.9);
   const busy = useRef(false);
-
-  // Campo de edição manual da taxa. Começa vazio; se o operador digitar algo,
-  // esse valor substitui o calculado antes de ser salvo. Se ficar vazio e o
-  // operador confirmar, usa o valor calculado pelo sistema.
-  const [customFee, setCustomFee] = useState<string>("");
 
   // custo por km pago ao entregador (Configurações → Entrega)
   useEffect(() => {
@@ -113,11 +103,9 @@ export function FreightApprovalPopup() {
   }, []);
 
   // contagem regressiva; fecha sozinho quando expira
-  // Também reseta o campo de taxa customizada quando um novo pedido aparece
   useEffect(() => {
     if (!item) return;
     busy.current = false;
-    setCustomFee(""); // limpa edição anterior ao mostrar novo item
     const tick = () => {
       const secs = Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - Date.now()) / 1000));
       setLeft(secs);
@@ -131,23 +119,9 @@ export function FreightApprovalPopup() {
   async function resolve(status: "approved" | "rejected") {
     if (!item || busy.current) return;
     busy.current = true;
-
-    // Se o operador digitou um valor diferente do calculado, usa esse valor.
-    // O campo aceita formatos como "8", "8,50", "8.50" — normaliza para número.
-    let effectiveFee = item.fee;
-    if (status === "approved" && customFee.trim()) {
-      const parsed = Number(customFee.trim().replace(",", "."));
-      if (!Number.isNaN(parsed) && parsed >= 0) {
-        effectiveFee = parsed;
-      }
-    }
-
-    // Salva o valor definitivo (original ou editado pelo operador) junto com o status.
-    // O campo `fee` na tabela é lido pelo webhook para usar como taxa oficial —
-    // nunca é sobrescrito pelo cálculo automático depois desta aprovação.
     const { error } = await supabase
       .from("pending_freight_approvals")
-      .update({ status, fee: effectiveFee, resolved_at: new Date().toISOString() })
+      .update({ status, resolved_at: new Date().toISOString() })
       .eq("id", item.id)
       .eq("status", "pending");
     if (error) {
@@ -155,13 +129,9 @@ export function FreightApprovalPopup() {
       toast.error("Não foi possível registrar sua resposta");
       return;
     }
-
-    const feeChanged = status === "approved" && effectiveFee !== item.fee;
     toast[status === "approved" ? "success" : "info"](
       status === "approved"
-        ? feeChanged
-          ? `Valor alterado para ${brl(effectiveFee)} e liberado para a IA.`
-          : "Valor liberado — a IA vai informar ao cliente."
+        ? "Valor liberado — a IA vai informar ao cliente."
         : "Conversa passou para atendimento manual.",
     );
     setItem(null);
@@ -226,36 +196,9 @@ export function FreightApprovalPopup() {
             </div>
           </div>
 
-          {/* Campo de edição manual da taxa — operador pode alterar antes de confirmar */}
-          <div className="rounded-xl border bg-muted/30 p-4">
-            <label className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              <Edit2 className="size-3.5" />
-              Valor a enviar ao cliente
-            </label>
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-muted-foreground">R$</span>
-              <input
-                type="text"
-                inputMode="decimal"
-                placeholder={Number(item.fee).toFixed(2).replace(".", ",")}
-                value={customFee}
-                onChange={(e) => setCustomFee(e.target.value)}
-                className="flex-1 rounded-lg border bg-background px-3 py-2 text-base font-bold focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-            </div>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
-              Deixe em branco para usar o valor calculado ({brl(item.fee)}).
-              O valor confirmado aqui será usado no resumo e no total — não será recalculado.
-            </p>
-          </div>
-
           <div className="flex gap-2">
             <Button className="flex-1" size="lg" onClick={() => resolve("approved")}>
-              {customFee.trim() &&
-               !Number.isNaN(Number(customFee.trim().replace(",", "."))) &&
-               Number(customFee.trim().replace(",", ".")) !== item.fee
-                ? `Confirmar R$ ${customFee.trim()} e enviar`
-                : "Sim, pode informar"}
+              Sim, pode informar
             </Button>
             <Button className="flex-1" size="lg" variant="outline" onClick={() => resolve("rejected")}>
               Não, eu respondo

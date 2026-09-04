@@ -27,7 +27,6 @@ import {
   UtensilsCrossed,
   LayoutGrid,
   List,
-  Gift,
   PackagePlus,
   Store,
 } from "lucide-react";
@@ -70,7 +69,6 @@ type Order = {
   scheduled_start_at: string | null;
   ifood_driver_assigned_at: string | null;
   nfood_driver_assigned_at: string | null;
-  loyalty_reward_used?: boolean;
 };
 
 function statusLabelFor(o: Order): string {
@@ -83,7 +81,6 @@ function OrdersDashboard() {
   const [alarmOn, setAlarmOn] = useState(true);
   const [soundReady, setSoundReady] = useState(false);
   const [lowStock, setLowStock] = useState<any[]>([]);
-  const [unreadByPhone, setUnreadByPhone] = useState<Record<string, boolean>>({});
   const [nowTick, setNowTick] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNowTick(Date.now()), 15_000);
@@ -107,28 +104,6 @@ function OrdersDashboard() {
       /* ignore */
     }
   }
-
-  useEffect(() => {
-    const normalizePhoneKey = (value: string | null | undefined) => String(value ?? "").replace(/\D/g, "");
-    const loadUnread = async () => {
-      const { data } = await supabase
-        .from("whatsapp_conversations")
-        .select("phone,has_unread,unread_count");
-      const next: Record<string, boolean> = {};
-      for (const row of data ?? []) {
-        const key = normalizePhoneKey((row as any).phone);
-        if (key) next[key] = Boolean((row as any).has_unread || Number((row as any).unread_count ?? 0) > 0);
-      }
-      setUnreadByPhone(next);
-    };
-    loadUnread();
-    const unreadChannel = supabase
-      .channel("orders-customer-unread")
-      .on("postgres_changes", { event: "*", schema: "public", table: "whatsapp_conversations" }, loadUnread)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "whatsapp_messages", filter: "direction=eq.in" }, loadUnread)
-      .subscribe();
-    return () => { supabase.removeChannel(unreadChannel); };
-  }, []);
 
   useEffect(() => {
     const loadStock = () =>
@@ -469,17 +444,11 @@ function OrdersDashboard() {
             const platformStuck = ifoodStuck || nfoodStuck;
             const s = STATUS_STYLE[o.status] ?? STATUS_STYLE.pending;
             const StatusIcon = s.icon;
-            const customerHasUnread = Boolean(unreadByPhone[String(o.customer_phone ?? "").replace(/\D/g, "")]);
             return (
               <Card
                 key={o.id}
-                className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${customerHasUnread ? "customer-message-pulse border-2 border-emerald-500" : platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
+                className={`overflow-hidden rounded-2xl border p-0 shadow-sm transition-shadow hover:shadow-lg ${platformStuck ? "ifood-urgent-pulse border-2 border-red-500" : isPending ? "alarm-pulse" : ""}`}
               >
-                {o.loyalty_reward_used && (
-                  <div className="flex items-center justify-center gap-2 bg-emerald-600 px-3 py-3 text-center text-sm font-black uppercase tracking-wide text-white shadow-inner">
-                    <Gift className="size-5" /> CLIENTE FIEL — TEM DIREITO A UMA BATATA GRÁTIS
-                  </div>
-                )}
                 {ifoodStuck && (
                   <div className="flex items-center justify-center gap-1.5 bg-red-600 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">
                     <AlertCircle className="size-3.5 animate-pulse" /> Pedido iFood aguardando aceite há mais de 3 min!
@@ -689,20 +658,6 @@ function OrdersDashboard() {
                       <XCircle className="size-3.5" /> Cancelar
                     </Button>
                   )}
-                  <Link
-                    to="/loja/chat"
-                    search={{ phone: o.customer_phone, name: o.customer_name || undefined }}
-                    className="col-span-2"
-                  >
-                    <Button
-                      size="sm"
-                      variant={customerHasUnread ? "default" : "outline"}
-                      className="w-full rounded-full font-semibold"
-                    >
-                      <MessageCircle className="size-3.5" />
-                      {customerHasUnread ? "Nova mensagem — abrir conversa" : "Conversar com cliente"}
-                    </Button>
-                  </Link>
                 </div>
               </Card>
             );
