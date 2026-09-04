@@ -25,17 +25,18 @@ export const createInfinitePayCheckout = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const cfg = await loadInfinitePayConfig(supabaseAdmin);
-    if (!cfg.enabled || !cfg.handle) {
+    if (!cfg.handle) {
       return { error: "Pagamento online indisponível no momento. Configure a InfinitePay em Configurações → Pagamentos." };
     }
 
     const { data: checkout, error } = await (supabaseAdmin as any)
       .from("site_checkout_sessions")
-      .select("id,status,total,subtotal,coupon_discount,customer_name,customer_phone,order_data,items,delivery_fee,expires_at,order_id")
+      .select("id,status,total,subtotal,coupon_discount,customer_name,customer_phone,order_data,items,delivery_fee,expires_at,order_id,payment_provider")
       .eq("id", data.checkoutId)
       .maybeSingle();
 
     if (error || !checkout) return { error: "Checkout não encontrado." };
+    if (checkout.payment_provider && checkout.payment_provider !== "infinitepay") return { error: "Este checkout pertence a outro provedor de pagamento." };
     if (checkout.order_id) return { error: "Este checkout já gerou um pedido." };
     if (!["created", "payment_pending"].includes(String(checkout.status))) return { error: "Este checkout não está mais disponível." };
     if (new Date(checkout.expires_at).getTime() < Date.now()) return { error: "Este checkout expirou. Refaça o pedido." };
@@ -110,7 +111,7 @@ export const confirmInfinitePayReturn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const cfg = await loadInfinitePayConfig(supabaseAdmin);
-    if (!cfg.enabled || !cfg.handle) return { ok: false, error: "Pagamento indisponível." };
+    if (!cfg.handle) return { ok: false, error: "Pagamento indisponível." };
 
     const { data: checkout } = await (supabaseAdmin as any)
       .from("site_checkout_sessions")
