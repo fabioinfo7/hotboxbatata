@@ -14,11 +14,19 @@ async function requireStoreAdmin(context: any) {
 
 const isPaymentFilter = (value: unknown): value is "all" | "pix" | "card" =>
   value === "all" || value === "pix" || value === "card";
+const isProviderFilter = (value: unknown): value is "all" | "infinitepay" | "mercadopago" =>
+  value === "all" || value === "infinitepay" || value === "mercadopago";
+
+const DIGITAL_KINDS = ["infinitepay", "infinitepay_card", "infinitepay_pix", "mercadopago", "mercadopago_card", "mercadopago_pix"];
 
 function applyPaymentFilter(query: any, payment: "all" | "pix" | "card") {
-  if (payment === "pix") return query.eq("payment_kind", "infinitepay_pix");
-  if (payment === "card") return query.in("payment_kind", ["infinitepay", "infinitepay_card"]);
-  return query.in("payment_kind", ["infinitepay", "infinitepay_card", "infinitepay_pix"]);
+  if (payment === "pix") return query.in("payment_kind", ["infinitepay_pix", "mercadopago_pix"]);
+  if (payment === "card") return query.in("payment_kind", ["infinitepay", "infinitepay_card", "mercadopago", "mercadopago_card"]);
+  return query.in("payment_kind", DIGITAL_KINDS);
+}
+
+function applyProviderFilter(query: any, provider: "all" | "infinitepay" | "mercadopago") {
+  return provider === "all" ? query : query.eq("payment_provider", provider);
 }
 
 export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
@@ -27,6 +35,7 @@ export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
     from: string;
     to: string;
     payment?: "all" | "pix" | "card";
+    provider?: "all" | "infinitepay" | "mercadopago";
     page?: number;
     pageSize?: number;
   }) => data)
@@ -34,6 +43,7 @@ export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
     if (!(await requireStoreAdmin(context))) return { ok: false, error: "Acesso não autorizado." } as const;
 
     const payment = isPaymentFilter(data.payment) ? data.payment : "all";
+    const provider = isProviderFilter(data.provider) ? data.provider : "all";
     const pageSize = Math.min(50, Math.max(10, Math.floor(Number(data.pageSize) || 15)));
     const page = Math.max(1, Math.floor(Number(data.page) || 1));
     const { since, until } = brasiliaDayRange(data.from, data.to);
@@ -42,7 +52,7 @@ export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
     let q = (supabaseAdmin as any)
       .from("site_checkout_sessions")
       .select(
-        "id,status,payment_kind,customer_name,customer_phone,subtotal,delivery_fee,coupon_code,coupon_discount,total,order_id,paid_at,created_at,updated_at,infinitepay_order_nsu,infinitepay_transaction_nsu,infinitepay_invoice_slug,infinitepay_receipt_url,infinitepay_amount_cents,infinitepay_paid_amount_cents,infinitepay_installments,infinitepay_capture_method,infinitepay_verified_at,infinitepay_webhook_payload,infinitepay_verification_payload,finance_reference,finance_note",
+        "id,status,payment_provider,payment_kind,customer_name,customer_phone,subtotal,delivery_fee,coupon_code,coupon_discount,total,order_id,paid_at,created_at,updated_at,infinitepay_receipt_url,infinitepay_amount_cents,infinitepay_paid_amount_cents,infinitepay_installments,mercadopago_status,mercadopago_status_detail,mercadopago_payment_method_id,mercadopago_payment_type_id,mercadopago_installments,mercadopago_transaction_amount,mercadopago_net_received_amount,mercadopago_fee_amount,finance_reference,finance_note",
         { count: "exact" },
       )
       .eq("status", "paid")
@@ -50,6 +60,7 @@ export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
       .gte("paid_at", since)
       .lte("paid_at", until);
     q = applyPaymentFilter(q, payment);
+    q = applyProviderFilter(q, provider);
 
     const fromRow = (page - 1) * pageSize;
     const toRow = fromRow + pageSize - 1;
@@ -70,6 +81,7 @@ export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
       p_since: since,
       p_until: until,
       p_payment_kind: payment,
+      p_provider: provider,
     });
     if (summaryError) return { ok: false, error: summaryError.message } as const;
 
@@ -77,6 +89,7 @@ export const listDigitalMenuFinanceFn = createServerFn({ method: "POST" })
       p_since: null,
       p_until: null,
       p_payment_kind: "all",
+      p_provider: "all",
     });
     if (allTimeError) return { ok: false, error: allTimeError.message } as const;
 
@@ -106,7 +119,7 @@ export const updateDigitalMenuFinanceMetaFn = createServerFn({ method: "POST" })
       })
       .eq("id", data.checkoutId)
       .eq("status", "paid")
-      .in("payment_kind", ["infinitepay", "infinitepay_card", "infinitepay_pix"]);
+      .in("payment_kind", DIGITAL_KINDS);
     if (error) return { ok: false, error: error.message } as const;
     return { ok: true } as const;
   });
@@ -126,7 +139,7 @@ export const hideDigitalMenuFinanceRecordFn = createServerFn({ method: "POST" })
       })
       .eq("id", data.checkoutId)
       .eq("status", "paid")
-      .in("payment_kind", ["infinitepay", "infinitepay_card", "infinitepay_pix"]);
+      .in("payment_kind", DIGITAL_KINDS);
     if (error) return { ok: false, error: error.message } as const;
     return { ok: true } as const;
   });
