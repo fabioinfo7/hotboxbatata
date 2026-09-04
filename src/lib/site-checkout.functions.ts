@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getEffectivePrice } from "@/lib/promotions";
 
-export type SitePaymentKind = "infinitepay";
+export type SitePaymentKind = "infinitepay" | "mercadopago";
 
 type CheckoutInput = {
   customer_name: string;
@@ -37,15 +37,22 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
     if (!name) return { error: "Informe o nome de quem vai receber." };
     if (phone.length < 10) return { error: "Informe um telefone válido." };
     if (!Array.isArray(data.items) || data.items.length === 0) return { error: "Seu carrinho está vazio." };
-    if (data.payment_kind !== "infinitepay") return { error: "Forma de pagamento inválida." };
+    if (!["infinitepay", "mercadopago"].includes(String(data.payment_kind || ""))) return { error: "Forma de pagamento inválida." };
 
     const { data: cfg } = await supabaseAdmin
       .from("store_config")
-      .select("infinitepay_enabled,digital_menu_card_enabled,digital_menu_pix_enabled")
+      .select("digital_payment_provider,infinitepay_enabled,infinitepay_handle,mercadopago_enabled,mercadopago_public_key,mercadopago_access_token,digital_menu_card_enabled,digital_menu_pix_enabled")
       .eq("id", 1)
       .maybeSingle();
 
-    if (cfg?.infinitepay_enabled !== true) return { error: "Pagamento online indisponível no momento." };
+    const activeProvider = String(cfg?.digital_payment_provider || "infinitepay") === "mercadopago" ? "mercadopago" : "infinitepay";
+    if (activeProvider === "mercadopago") {
+      if (cfg?.mercadopago_enabled !== true || !String(cfg?.mercadopago_public_key || "").trim() || !String(cfg?.mercadopago_access_token || "").trim()) {
+        return { error: "Mercado Pago está selecionado, mas a integração ainda não está completamente configurada." };
+      }
+    } else if (cfg?.infinitepay_enabled !== true || !String(cfg?.infinitepay_handle || "").trim()) {
+      return { error: "InfinitePay está selecionada, mas a integração ainda não está completamente configurada." };
+    }
 
     let deliveryFee = 0;
     let normalizedNeighborhood = data.address_neighborhood || null;
@@ -157,7 +164,8 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
       .from("site_checkout_sessions")
       .insert({
         status: "created",
-        payment_kind: data.payment_kind,
+        payment_kind: activeProvider,
+        payment_provider: activeProvider,
         customer_name: name,
         customer_phone: phone,
         order_data: orderData,
@@ -171,7 +179,7 @@ export const createSiteCheckout = createServerFn({ method: "POST" })
         total,
         expires_at: new Date(Date.now() + 20 * 60_000).toISOString(),
       })
-      .select("id,total,payment_kind,status")
+      .select("id,total,payment_kind,payment_provider,status")
       .single();
     if (insertError || !checkout) return { error: insertError?.message || "Não foi possível iniciar o checkout." };
 
@@ -196,7 +204,7 @@ export const getSiteCheckoutStatus = createServerFn({ method: "GET" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: checkout, error } = await (supabaseAdmin as any)
       .from("site_checkout_sessions")
-      .select("id,status,payment_kind,total,order_id,stripe_session_id,stripe_payment_intent_id,expires_at,created_at")
+      .select("id,status,payment_kind,payment_provider,total,order_id,stripe_session_id,stripe_payment_intent_id,mercadopago_payment_id,mercadopago_status,expires_at,created_at")
       .eq("id", data.checkoutId)
       .maybeSingle();
     if (error || !checkout) return { error: "Checkout não encontrado." };
@@ -214,7 +222,7 @@ export async function notifyPaidSiteOrder(supabaseAdmin: any, orderId: string) {
   const ref = order.external_display_id || order.order_number;
   const refText = ref ? ` #${String(ref).replace(/^#/, "")}` : "";
   const method = order.payment_method === "pix" ? "Pix" : "cartão";
-  const provider = order.payment_confirmed_by === "infinitepay" ? "InfinitePay" : "Stripe";
+  const provider = order.payment_confirmed_by === "infinitepay" ? "InfinitePay" : order.payment_confirmed_by === "mercadopago" ? "Mercado Pago" : "pagamento online";
   const message = `✅ *Pagamento confirmado via ${provider}*\n\nOlá, ${firstName}! O pagamento do pedido${refText} via ${method} foi confirmado. Seu pedido já entrou no sistema da Hotbox e seguirá para preparo. 🍟🔥\n\nVamos avisar por aqui cada etapa até a entrega.`;
   try {
     const { sendWhatsappText } = await import("@/lib/whatsapp-send.server");
@@ -241,5 +249,13 @@ export const cancelSiteCheckout = createServerFn({ method: "POST" })
     if (!checkout || checkout.status === "paid") return { ok: false } as const;
     if (checkout.loyalty_reward_id && (!userId || checkout.customer_user_id !== userId)) return { ok: false } as const;
     await (supabaseAdmin as any).from("site_checkout_sessions").update({ status: "cancelled", updated_at: new Date().toISOString() }).eq("id", checkout.id);
+    if (checkout.loyalty_reward_id && userId) {
+      await (supabaseAdmin as any).from("loyalty_rewards")
+        .update({ status: "available", checkout_id: null, reserved_at: null, updated_at: new Date().toISOString() })
+        .eq("id", checkout.loyalty_reward_id)
+        .eq("user_id", userId)
+        .eq("status", "reserved")
+        .eq("checkout_id", checkout.id);
+    }
     return { ok: true } as const;
   });
